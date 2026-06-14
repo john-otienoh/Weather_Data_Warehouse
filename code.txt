@@ -1,0 +1,37 @@
+weather-data-warehouse/
+#  │
+#  ├── .env                        ← Your secret config (passwords, DB URL)
+#  ├── .env.example                ← Template showing what goes in .env
+#  ├── requirements.txt            ← Python packages to install
+#  ├── docker-compose.yml          ← Starts PostgreSQL + Airflow
+#  │
+#  ├── scripts/
+#  │   ├── init_db.sql             ← Creates all schemas and tables (run once)
+#  │   └── setup_airflow.sh        ← Configures Airflow connections (run once)
+#  │
+#  ├── src/
+#  │   └── db/
+#  │       └── connection.py       ← Single place to get a DB connection
+#  │
+#  ├── generation/                 ── STAGE 1
+#  │   └── weather_ingest.py       ← Fetches data from Open-Meteo → PostgreSQL
+#  │
+#  ├── transformation/             ── STAGE 4
+#  │   ├── transform_runner.py     ← Runs all SQL transforms from Python
+#  │   ├── daily_summary.sql       ← Silver → Gold: daily aggregation
+#  │   ├── monthly_summary.sql     ← Silver → Gold: monthly rollup
+#  │   └── anomaly_detection.sql   ← Gold: temperature anomaly flags
+#  │
+#  ├── dags/                       ── STAGE 3 (Airflow)
+#  │   ├── hourly_ingest.py        ← Runs weather_ingest.py every hour
+#  │   ├── backfill.py             ← Loads 31 days of history (manual)
+#  │   ├── daily_transforms.py     ← Runs transforms at 01:00 EAT daily
+#  │   └── weekly_digest.py        ← Sends summary email every Monday
+#  │
+#  ├── serving/                    ── STAGE 5
+#  │   ├── dashboard.py            ← Plotly Dash web dashboard (port 8050)
+#  │   ├── api.py                  ← Flask REST API (port 5000)
+#  │   └── reports.py              ← Generates CSV / HTML weekly reports
+#  │
+#  └── logs/                       ← Airflow writes logs here
+#

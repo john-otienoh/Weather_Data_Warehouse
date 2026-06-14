@@ -1,0 +1,12 @@
+openmeteo-requests
+requests-cache
+retry-requests
+pandas
+psycopg2-binary
+SQLAlchemy
+python-dotenv
+apache-airflow
+dash
+plotly
+flask
+cryptography

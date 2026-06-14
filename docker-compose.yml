@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: weather_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-weather_db}
+      POSTGRES_USER:     ${POSTGRES_USER:-weather_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-weather_admin} -d ${POSTGRES_DB:-weather_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - weather_net
+  # pgadmin:
+  #   image: dpage/pgadmin4:latest
+  #   container_name: weather_pgadmin
+  #   restart: unless-stopped
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_EMAIL:-admin@weather.local}
+  #     PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+  #   ports:
+  #     - "5050:80"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   volumes:
+  #     - pgadmin_data:/var/lib/pgadmin
+  #   networks:
+  #     - weather_net
+
+volumes:
+  postgres_data:
+  # pgadmin_data:
+
+networks:
+  weather_net:
+    driver: bridge
