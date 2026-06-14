@@ -34,9 +34,9 @@ import pandas as pd
 import requests_cache
 from retry_requests import retry
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 try:
-    from sqlalchemy import create_engine, text
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
@@ -118,8 +118,8 @@ def build_params(mode: str="live") -> dict:
         "latitude":  [c["lat"] for c in CITIES],
         "longitude": [c["lon"] for c in CITIES],
         "hourly":    HOURLY_VARS,
-        "timezone":  "auto",
-        # "timezone": "Africa/Nairobi",
+        # "timezone":  "auto",
+        "timezone": "Africa/Nairobi",
     }
     if mode == "backfill":
         params["past_days"] = 31
@@ -147,24 +147,8 @@ def parse_response(
     fetched_at: datetime,
 ) -> pd.DataFrame:
     """
-    Parse one Open-Meteo city response into a tidy DataFrame.
-
-    Schema columns produced:
-        city               — city name string
-        recorded_at        — forecast timestamp (timezone-aware)
-        fetched_at         — when this ingest run executed (UTC)
-        temp_celsius       — 2 m air temperature °C
-        apparent_temp      — feels-like temperature °C
-        humidity_pct       — relative humidity %
-        precipitation_mm   — total precipitation mm
-        rain_mm            — rain-only precipitation mm
-        weather_code       — WMO weather interpretation code
-        pressure_hpa       — surface pressure hPa
-        cloud_cover_pct    — cloud cover %
-        wind_speed_mps     — 10 m wind speed m/s
-        wind_direction_deg — 10 m wind direction degrees
-        "wind_gusts_10m"   — Gust speed for aviation/transport context
-        "visibility"       — Fog/smog detection
+    Converts the API response for one city into a clean pandas DataFrame.
+    Each row = one hour of data for that city.
     """
     hourly = response.Hourly()
 
@@ -249,15 +233,17 @@ def validate_dataframe(df: pd.DataFrame, city_name: str) -> bool:
 
 def write_to_db(df: pd.DataFrame, engine) -> None:
     """
-    Write the unified DataFrame to bronze.weather_readings via a
-    staging-table upsert.
+    Write the unified DataFrame to:
+        BRONZE: insert raw data to a staging table
+        SILVER: upsert from staging into silver.weather_readings
+            ON CONFLICT DO NOTHING = safe to re-run without creating duplicates
     """
     staging_table = "weather_readings_staging"
 
     # Step 1: write to a temporary staging table
     df.to_sql(
         staging_table,
-        schema="bronze",
+        schema="silver",
         con=engine,
         if_exists="replace",
         index=False,
@@ -267,11 +253,11 @@ def write_to_db(df: pd.DataFrame, engine) -> None:
 
     # Step 2: upsert from staging into the real table
     upsert_sql = text("""
-        INSERT INTO bronze.weather_readings
-        SELECT * FROM bronze.weather_readings_staging
+        INSERT INTO silver.weather_readings
+        SELECT * FROM silver.weather_readings_staging
         ON CONFLICT (city, recorded_at) DO NOTHING;
 
-        DROP TABLE IF EXISTS bronze.weather_readings_staging;
+        DROP TABLE IF EXISTS silver.weather_readings_staging;
     """)
 
     with engine.begin() as conn:

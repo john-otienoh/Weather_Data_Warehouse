@@ -1,4 +1,153 @@
-weather-data-warehouse/
+################################################################################
+#                                                                              #
+#             WEATHER DATA WAREHOUSE — COMPLETE PRODUCTION CODEBASE           #
+#           Medallion Architecture | Python · PostgreSQL · Airflow             #
+#                                                                              #
+#   Monitors 5 Kenyan cities: Nairobi · Mombasa · Kisumu · Nakuru · Eldoret   #
+#   Data source: Open-Meteo API (free, no API key needed)                      #
+#   Pipeline: Generation → Storage → Ingestion → Transformation → Serving      #
+#                                                                              #
+#   HOW TO USE THIS FILE                                                       #
+#   Read it top to bottom like a book. Each section explains what it does      #
+#   and why, then shows the code. Copy each file into your project folder.     #
+#                                                                              #
+################################################################################
+
+
+################################################################################
+# TABLE OF CONTENTS
+################################################################################
+#
+#  PART 0  ── TUTORIAL: What Is This Project?
+#  PART 1  ── Medallion Architecture Explained
+#  PART 2  ── Tech Stack (Beginner-Friendly)
+#  PART 3  ── Project Structure
+#  PART 4  ── Configuration (.env · requirements.txt · docker-compose.yml)
+#  PART 5  ── STAGE 1: Generation   ── Bronze Layer (raw API data)
+#  PART 6  ── STAGE 2: Storage      ── Database setup (all 3 layers)
+#  PART 7  ── STAGE 3: Ingestion    ── Airflow DAGs (scheduling)
+#  PART 8  ── STAGE 4: Transformation── Silver & Gold layers (SQL)
+#  PART 9  ── STAGE 5: Serving      ── Python Dashboard + Flask API
+#  PART 10 ── Step-by-Step Tutorial (how to run everything from zero)
+#  PART 11 ── Common Errors & Fixes
+#  PART 12 ── How to Extend the Project
+#  PART 13 ── Learning Path
+#
+################################################################################
+
+
+################################################################################
+# PART 0 — TUTORIAL: WHAT IS THIS PROJECT?
+################################################################################
+#
+#  WHAT IS A DATA PIPELINE?
+#  ------------------------
+#  Think of a data pipeline like a water system in a city:
+#
+#    Reservoir (API)  →  Pipes (Ingestion)  →  Treatment (Transform)
+#                                                      ↓
+#                                            Taps (Dashboard/API)
+#
+#  Raw water enters at the source. It flows through pipes, gets cleaned and
+#  treated, and clean water comes out at your tap. This project does the same
+#  thing with weather data.
+#
+#  WHAT ARE THE 5 STAGES?
+#  ----------------------
+#    Stage 1 — Generation:    Fetch raw weather data from Open-Meteo API
+#    Stage 2 — Storage:       Design where and how data is stored (PostgreSQL)
+#    Stage 3 — Ingestion:     Schedule automatic hourly data collection (Airflow)
+#    Stage 4 — Transformation: Clean and aggregate raw data into useful summaries
+#    Stage 5 — Serving:       Show the data on dashboards and through an API
+#
+#  WHY THESE 5 STAGES?
+#  -------------------
+#  Each stage has ONE job. When something breaks, you know exactly where to look.
+#  When you want to add a feature, you know exactly which file to edit.
+#  This is how professional data engineers think about systems.
+#
+#  WHAT WILL YOU BUILD?
+#  --------------------
+#  By the end you will have a system that:
+#    • Automatically pulls weather data every hour for 5 Kenyan cities
+#    • Stores it in a structured PostgreSQL database
+#    • Computes daily averages, monthly summaries, and temperature anomalies
+#    • Shows everything on a live Python dashboard (no Grafana needed)
+#    • Exposes a simple API so other apps can read the data
+#
+################################################################################
+
+
+################################################################################
+# PART 1 — MEDALLION ARCHITECTURE
+################################################################################
+#
+#  Medallion Architecture is an industry-standard way to organise data in a
+#  warehouse. Think of it like refining raw ore into finished product:
+#
+#
+#   BRONZE (Raw)          SILVER (Clean)         GOLD (Ready)
+#   ─────────────         ──────────────         ────────────
+#   Data exactly          Validated, typed,      Aggregated, business-
+#   as it arrived         deduplicated           ready answers
+#   from the API          hourly readings        (daily / monthly)
+#
+#   bronze.*  ──────────► silver.*  ────────────► gold.*
+#
+#
+#   In PostgreSQL this becomes three schemas:
+#
+#   bronze.weather_raw         ← raw JSON from Open-Meteo, never modified
+#   silver.weather_readings    ← parsed into columns, one row per city/hour
+#   gold.daily_summary         ← one row per city per day (avg/min/max etc.)
+#   gold.monthly_summary       ← one row per city per month
+#   gold.temperature_anomalies ← hourly readings flagged as unusual
+#
+#
+#   WHY THREE LAYERS?
+#   -----------------
+#   Bronze: If you make a mistake in parsing, you can replay from raw data.
+#   Silver: All downstream work reads clean, consistent, typed data.
+#   Gold:   Dashboards and APIs read fast pre-computed answers, not raw rows.
+#
+#   ANALOGY:
+#   Bronze = fresh vegetables from the market
+#   Silver = washed, peeled, chopped vegetables
+#   Gold   = cooked meal, plated and ready to serve
+#
+################################################################################
+
+
+################################################################################
+# PART 2 — TECH STACK
+################################################################################
+#
+#  Tool                  What it does                     Why this one?
+#  ──────────────────    ──────────────────────────────   ──────────────────────
+#  Python 3.11           Main programming language        Free, readable, huge
+#                                                         community
+#  PostgreSQL 15         Database (stores all data)       Free, reliable, SQL
+#  Apache Airflow 2.8    Scheduler (runs jobs on time)    Industry standard,
+#                                                         free, Python-based
+#  Plotly Dash 2.x       Interactive web dashboard        Pure Python — no
+#                                                         JavaScript needed
+#  Flask 3.x             Simple web API                   Easiest Python web
+#                                                         framework
+#  pandas 2.x            Data manipulation                Simple, powerful
+#  openmeteo-requests    Open-Meteo API client            Free weather data
+#  psycopg2              PostgreSQL ↔ Python connector    Official adapter
+#  SQLAlchemy 2.0        Python ORM (talks to database)   Works with pandas
+#  Docker Compose        Runs PostgreSQL + Airflow        One command setup
+#  python-dotenv         Loads .env secrets               Keeps passwords safe
+#
+################################################################################
+
+
+################################################################################
+# PART 3 — PROJECT STRUCTURE
+################################################################################
+#
+#  weather-data-warehouse/
 #  │
 #  ├── .env                        ← Your secret config (passwords, DB URL)
 #  ├── .env.example                ← Template showing what goes in .env
@@ -9,9 +158,8 @@ weather-data-warehouse/
 #  │   ├── init_db.sql             ← Creates all schemas and tables (run once)
 #  │   └── setup_airflow.sh        ← Configures Airflow connections (run once)
 #  │
-#  ├── src/
-#  │   └── db/
-#  │       └── connection.py       ← Single place to get a DB connection
+#  ├── db/
+#  │   └── connection.py       ← Single place to get a DB connection
 #  │
 #  ├── generation/                 ── STAGE 1
 #  │   └── weather_ingest.py       ← Fetches data from Open-Meteo → PostgreSQL
@@ -35,3 +183,2331 @@ weather-data-warehouse/
 #  │
 #  └── logs/                       ← Airflow writes logs here
 #
+################################################################################
+
+
+################################################################################
+# PART 4 — CONFIGURATION
+################################################################################
+
+
+# ==============================================================================
+# FILE: .env.example
+# WHAT IT DOES: Template for your secret configuration values.
+#               Copy to .env and fill in real values. Never commit .env to git.
+# ==============================================================================
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────────
+POSTGRES_DB=weather_db
+POSTGRES_USER=weather_admin
+POSTGRES_PASSWORD=change_me_to_something_strong
+POSTGRES_PORT=5432
+
+# ── Application database URL ───────────────────────────────────────────────────
+# This is what Python uses to connect. Replace the password.
+DATABASE_URL=postgresql+psycopg2://weather_admin:change_me_to_something_strong@localhost:5432/weather_db
+
+# ── Airflow ────────────────────────────────────────────────────────────────────
+# Generate Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+AIRFLOW_FERNET_KEY=your_generated_fernet_key_here
+# Generate secret:    python -c "import secrets; print(secrets.token_hex(32))"
+AIRFLOW_SECRET_KEY=your_generated_secret_key_here
+AIRFLOW_ADMIN_PASSWORD=admin_password_here
+AIRFLOW_ADMIN_EMAIL=you@example.com
+
+# ── Email alerts (optional) ────────────────────────────────────────────────────
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASSWORD=your_gmail_app_password
+ALERT_EMAIL=you@example.com
+
+
+# ==============================================================================
+# FILE: requirements.txt
+# WHAT IT DOES: Lists all Python packages. Install with: pip install -r requirements.txt
+# ==============================================================================
+
+# Data collection
+openmeteo-requests==0.3.0
+requests-cache==1.2.1
+retry-requests==2.0.0
+
+# Data manipulation
+pandas==2.2.2
+
+# Database
+psycopg2-binary==2.9.9
+SQLAlchemy==2.0.30
+python-dotenv==1.0.1
+
+# Orchestration
+apache-airflow==2.8.0
+
+# Dashboard (replaces Grafana — pure Python!)
+dash==2.17.0
+plotly==5.22.0
+
+# API
+flask==3.0.3
+
+# Utilities
+cryptography==41.0.5
+
+
+# ==============================================================================
+# FILE: docker-compose.yml
+# WHAT IT DOES: Starts PostgreSQL and Apache Airflow with one command.
+#               Run: docker compose up -d
+# ==============================================================================
+
+services:
+
+  # ── PostgreSQL database ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: weather_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-weather_db}
+      POSTGRES_USER:     ${POSTGRES_USER:-weather_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      retries: 5
+    networks:
+      - weather_net
+
+  # ── Airflow: one-time database setup ────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.8.0
+    container_name: airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --password ${AIRFLOW_ADMIN_PASSWORD}
+          --firstname Admin --lastname User
+          --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
+      "
+    restart: "no"
+    networks:
+      - weather_net
+
+  # ── Airflow scheduler (runs your DAGs on schedule) ──────────────────────────
+  airflow-scheduler:
+    image: apache/airflow:2.8.0
+    container_name: airflow_scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PYTHONPATH: /opt/airflow/project
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - .:/opt/airflow/project
+    command: scheduler
+    networks:
+      - weather_net
+
+  # ── Airflow web UI (view DAGs at http://localhost:8080) ─────────────────────
+  airflow-webserver:
+    image: apache/airflow:2.8.0
+    container_name: airflow_webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-scheduler:
+        condition: service_started
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - weather_net
+
+volumes:
+  postgres_data:
+
+networks:
+  weather_net:
+    driver: bridge
+
+
+# ==============================================================================
+# FILE: scripts/setup_airflow.sh
+# WHAT IT DOES: Creates the database connection inside Airflow so DAGs can
+#               find PostgreSQL. Run once after `docker compose up -d`.
+# HOW TO RUN:   bash scripts/setup_airflow.sh
+# ==============================================================================
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Setting up Airflow connections and variables..."
+
+SCHEDULER="docker compose exec airflow-scheduler"
+
+# Add the weather database connection
+$SCHEDULER airflow connections add weather_postgres \
+    --conn-type    postgres \
+    --conn-host    postgres \
+    --conn-port    5432 \
+    --conn-schema  weather_db \
+    --conn-login   "${POSTGRES_USER}" \
+    --conn-password "${POSTGRES_PASSWORD}"
+
+# Set variables that DAGs will read at runtime
+$SCHEDULER airflow variables set ALERT_EMAIL        "${ALERT_EMAIL}"
+$SCHEDULER airflow variables set WEATHER_CITIES     "Nairobi,Mombasa,Kisumu,Nakuru,Eldoret"
+$SCHEDULER airflow variables set MIN_ROWS_PER_CITY  "20"
+
+echo "Done! Open http://localhost:8080 (admin / your AIRFLOW_ADMIN_PASSWORD)"
+
+
+################################################################################
+# PART 5 — STAGE 1: GENERATION (BRONZE LAYER)
+################################################################################
+#
+#  WHAT THIS STAGE DOES
+#  --------------------
+#  Fetches raw hourly weather data from Open-Meteo for 5 Kenyan cities
+#  and writes it to the database.
+#
+#  Think of this like a shopping trip: you go to the market (Open-Meteo),
+#  buy raw ingredients (JSON weather data), and bring them home (PostgreSQL).
+#
+#  WHAT GOES INTO THE BRONZE LAYER?
+#  ---------------------------------
+#  The raw API response, unchanged, stored as JSONB.
+#  Plus a parsed version stored as typed columns in silver.weather_readings.
+#  Bronze = the receipt. Silver = the food on your counter.
+#
+#  HOW TO RUN:
+#    python generation/weather_ingest.py               # live mode (today)
+#    python generation/weather_ingest.py --mode backfill  # 31 days history
+#    python generation/weather_ingest.py --dry-run     # test without writing
+#
+
+
+# ==============================================================================
+# FILE: generation/weather_ingest.py
+# ==============================================================================
+
+import os
+import sys
+import logging
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+
+import openmeteo_requests
+import pandas as pd
+import requests_cache
+from retry_requests import retry
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+load_dotenv()
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Prints messages with a timestamp so you can see exactly what happened when.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+# ── City configuration ────────────────────────────────────────────────────────
+# Add or remove cities here. Latitude/longitude from Google Maps.
+CITIES = [
+    {"name": "Nairobi",  "lat": -1.2833, "lon": 36.8167},
+    {"name": "Mombasa",  "lat": -4.0547, "lon": 39.6636},
+    {"name": "Kisumu",   "lat": -0.0861, "lon": 34.7289},
+    {"name": "Nakuru",   "lat": -0.3072, "lon": 36.0722},
+    {"name": "Eldoret",  "lat":  0.5204, "lon": 35.2699},
+]
+
+# ── Weather variables to collect ──────────────────────────────────────────────
+# Full list at https://open-meteo.com/en/docs#hourly-variables
+HOURLY_VARS = [
+    "temperature_2m",        # air temperature at 2 metres height (°C)
+    "relative_humidity_2m",  # relative humidity (%)
+    "apparent_temperature",  # feels-like temperature (°C)
+    "precipitation",         # total precipitation mm
+    "rain",                  # rain-only mm
+    "weather_code",          # WMO weather code (0=clear, 61=rain, 95=thunder...)
+    "surface_pressure",      # surface pressure hPa
+    "cloud_cover",           # cloud cover %
+    "wind_speed_10m",        # wind speed at 10 m (m/s)
+    "wind_direction_10m",    # wind direction degrees
+    "wind_gusts_10m",        # wind gusts (m/s)
+    "visibility",            # visibility in metres
+]
+
+# Safe name→index map: if you reorder HOURLY_VARS the extraction won't break
+VAR_MAP = {name: i for i, name in enumerate(HOURLY_VARS)}
+
+API_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+# ── Step 1: Build the API client ──────────────────────────────────────────────
+def build_client() -> openmeteo_requests.Client:
+    """
+    Creates an API client with:
+      - Caching: saves results locally for 30 min (avoids hitting API twice)
+      - Retry:   automatically retries on network failures (up to 5 times)
+    """
+    cache_dir = Path(__file__).parent / ".openmeteo_cache"
+    cache_dir.mkdir(exist_ok=True)
+
+    session = requests_cache.CachedSession(
+        str(cache_dir / "cache"), expire_after=1800
+    )
+    retry_session = retry(session, retries=5, backoff_factor=0.2)
+    log.info("API client ready (cache: %s)", cache_dir)
+    return openmeteo_requests.Client(session=retry_session)
+
+
+# ── Step 2: Build API parameters ─────────────────────────────────────────────
+def build_params(mode: str = "live") -> dict:
+    """
+    mode='live'     → fetch today's 24 hourly readings (one full day)
+    mode='backfill' → fetch the last 31 days (used to seed the database)
+    """
+    params = {
+        "latitude":  [c["lat"] for c in CITIES],
+        "longitude": [c["lon"] for c in CITIES],
+        "hourly":    HOURLY_VARS,
+        "timezone":  "auto",  # Open-Meteo detects Africa/Nairobi from coordinates
+    }
+    if mode == "backfill":
+        params["past_days"] = 31
+        log.info("Mode: BACKFILL — fetching 31 days of history")
+    else:
+        params["forecast_days"] = 1
+        log.info("Mode: LIVE — fetching today (24 rows per city)")
+    return params
+
+
+# ── Step 3: Call the API ──────────────────────────────────────────────────────
+def fetch_weather(client, params: dict) -> list:
+    """Calls Open-Meteo and returns one response object per city."""
+    log.info("Calling Open-Meteo for %d cities ...", len(CITIES))
+    responses = client.weather_api(API_URL, params=params)
+    log.info("Received %d responses", len(responses))
+    return responses
+
+
+# ── Step 4: Parse one city response into a DataFrame ─────────────────────────
+def parse_response(response, city: dict, fetched_at: datetime) -> pd.DataFrame:
+    """
+    Converts the API response for one city into a clean pandas DataFrame.
+    Each row = one hour of data for that city.
+    """
+    hourly = response.Hourly()
+
+    # Use VAR_MAP so the extraction never silently breaks if order changes
+    def get(var_name: str):
+        return hourly.Variables(VAR_MAP[var_name]).ValuesAsNumpy()
+
+    # Build the timestamps for each hourly reading
+    times = pd.date_range(
+        start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+        end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+        freq=pd.Timedelta(seconds=hourly.Interval()),
+        inclusive="left",
+    )
+
+    df = pd.DataFrame({
+        "city":               city["name"],
+        "recorded_at":        times,
+        "fetched_at":         fetched_at,          # when we pulled this data
+        "temp_celsius":       get("temperature_2m"),
+        "apparent_temp":      get("apparent_temperature"),
+        "humidity_pct":       get("relative_humidity_2m"),
+        "precipitation_mm":   get("precipitation"),
+        "rain_mm":            get("rain"),
+        "weather_code":       get("weather_code"),
+        "pressure_hpa":       get("surface_pressure"),
+        "cloud_cover_pct":    get("cloud_cover"),
+        "wind_speed_mps":     get("wind_speed_10m"),
+        "wind_direction_deg": get("wind_direction_10m"),
+        "wind_gusts_mps":     get("wind_gusts_10m"),
+        "visibility_m":       get("visibility"),
+    })
+
+    log.info("  [%s] %d rows parsed", city["name"], len(df))
+    return df
+
+
+# ── Step 5: Validate the data ─────────────────────────────────────────────────
+def validate(df: pd.DataFrame, city_name: str) -> bool:
+    """
+    Quick sanity checks before writing to the database.
+    Returns False if something looks wrong (empty or all nulls).
+    """
+    if df.empty:
+        log.error("  [%s] EMPTY — skipping", city_name)
+        return False
+
+    nulls = df["temp_celsius"].isna().sum()
+    if nulls > 20:
+        log.warning("  [%s] %d null temperatures", city_name, nulls)
+
+    out_of_range = (~df["temp_celsius"].dropna().between(-5, 45)).sum()
+    if out_of_range:
+        log.warning("  [%s] %d suspicious temperatures", city_name, out_of_range)
+
+    log.info("  [%s] validation OK", city_name)
+    return True
+
+
+# ── Step 6: Write to Bronze then Silver ──────────────────────────────────────
+def write_to_db(df: pd.DataFrame, engine) -> None:
+    """
+    BRONZE: insert raw data to a staging table
+    SILVER: upsert from staging into silver.weather_readings
+            ON CONFLICT DO NOTHING = safe to re-run without creating duplicates
+    """
+    # Write to staging (creates/replaces the table each time)
+    df.to_sql(
+        "weather_readings_staging",
+        schema="silver",
+        con=engine,
+        if_exists="replace",
+        index=False,
+        method="multi",
+    )
+
+    # Upsert from staging into the real silver table
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO silver.weather_readings
+            SELECT * FROM silver.weather_readings_staging
+            ON CONFLICT (city, recorded_at) DO NOTHING;
+
+            DROP TABLE IF EXISTS silver.weather_readings_staging;
+        """))
+
+    log.info("  Wrote %d rows to silver.weather_readings", len(df))
+
+
+def write_to_csv(df: pd.DataFrame) -> None:
+    """Fallback: save to CSV if no DATABASE_URL is set."""
+    from datetime import datetime
+    path = f"data/raw/weather_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv"
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    log.info("Saved to %s", path)
+
+
+# ── Main: wires everything together ──────────────────────────────────────────
+def main(mode: str = "live", dry_run: bool = False) -> None:
+    log.info("===== Weather Ingest START [mode=%s | dry_run=%s] =====", mode, dry_run)
+
+    fetched_at = datetime.now(timezone.utc)
+    client     = build_client()
+    params     = build_params(mode)
+
+    try:
+        responses = fetch_weather(client, params)
+    except Exception as e:
+        log.error("API call failed: %s", e)
+        sys.exit(1)
+
+    all_dfs, failed = [], []
+
+    for i, response in enumerate(responses):
+        city = CITIES[i]
+        try:
+            df = parse_response(response, city, fetched_at)
+            if validate(df, city["name"]):
+                all_dfs.append(df)
+        except Exception as e:
+            log.error("  [%s] parse failed: %s", city["name"], e)
+            failed.append(city["name"])
+
+    if failed:
+        log.warning("Skipped cities: %s", failed)
+
+    if not all_dfs:
+        log.error("No data collected. Exiting.")
+        sys.exit(1)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+    log.info("Total: %d rows | cities: %d", len(combined), len(all_dfs))
+
+    if dry_run:
+        log.info("DRY RUN — not writing. Sample:")
+        print(combined.head(5).to_string(index=False))
+        return
+
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        try:
+            engine = create_engine(db_url, pool_pre_ping=True)
+            write_to_db(combined, engine)
+        except Exception as e:
+            log.error("DB write failed: %s — saving to CSV", e)
+            write_to_csv(combined)
+    else:
+        log.warning("DATABASE_URL not set — writing to CSV")
+        write_to_csv(combined)
+
+    log.info("===== Weather Ingest DONE =====")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Weather ingest — Stage 1")
+    parser.add_argument("--mode",    choices=["live", "backfill"], default="live")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    main(mode=args.mode, dry_run=args.dry_run)
+
+
+################################################################################
+# PART 6 — STAGE 2: STORAGE (DATABASE SETUP)
+################################################################################
+#
+#  WHAT THIS STAGE DOES
+#  --------------------
+#  Designs and creates the database structure. Three layers (Medallion):
+#    Bronze → raw data exactly as received
+#    Silver → clean, typed, one column per variable
+#    Gold   → pre-computed aggregates for fast dashboards
+#
+#  This file runs automatically when Docker starts PostgreSQL for the first time
+#  because it is mounted at /docker-entrypoint-initdb.d/init_db.sql
+#
+
+
+# ==============================================================================
+# FILE: scripts/init_db.sql
+# WHAT IT DOES: Creates all schemas, tables, and indexes.
+#               Runs automatically on first `docker compose up -d`.
+# ==============================================================================
+
+-- Create the Airflow metadata database (Airflow stores its own data here)
+CREATE DATABASE airflow_db;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BRONZE LAYER — raw data exactly as received from the API
+-- Never update or delete rows here. This is your audit trail.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS bronze;
+
+CREATE TABLE IF NOT EXISTS bronze.weather_raw (
+    id         BIGSERIAL    PRIMARY KEY,
+    city       VARCHAR(100) NOT NULL,
+    fetched_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    payload    JSONB        NOT NULL        -- the full API response, unchanged
+);
+
+-- Index for querying raw data by city and time
+CREATE INDEX IF NOT EXISTS idx_bronze_city_fetched
+    ON bronze.weather_raw (city, fetched_at DESC);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SILVER LAYER — clean, parsed, typed hourly readings
+-- One row per city per hour. Validated and deduplicated.
+-- Stage 1 writes here. Stage 4 reads from here.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS silver;
+
+CREATE TABLE IF NOT EXISTS silver.weather_readings (
+    id                  BIGSERIAL    PRIMARY KEY,
+    city                VARCHAR(100) NOT NULL,
+    recorded_at         TIMESTAMPTZ  NOT NULL,    -- the forecast hour (EAT)
+    fetched_at          TIMESTAMPTZ  NOT NULL,    -- when we pulled it
+    temp_celsius        NUMERIC(5,2),             -- 2m air temperature °C
+    apparent_temp       NUMERIC(5,2),             -- feels-like temperature °C
+    humidity_pct        SMALLINT,                 -- relative humidity 0–100
+    precipitation_mm    NUMERIC(6,3),             -- total precipitation mm
+    rain_mm             NUMERIC(6,3),             -- rain-only mm
+    weather_code        SMALLINT,                 -- WMO code (0=clear, 61=rain)
+    pressure_hpa        NUMERIC(7,2),             -- surface pressure hPa
+    cloud_cover_pct     SMALLINT,                 -- cloud cover 0–100
+    wind_speed_mps      NUMERIC(5,2),             -- 10m wind speed m/s
+    wind_direction_deg  SMALLINT,                 -- wind direction 0–360
+    wind_gusts_mps      NUMERIC(5,2),             -- wind gusts m/s
+    visibility_m        INTEGER                   -- visibility in metres
+);
+
+-- Unique constraint: prevents duplicate (city, hour) combinations
+-- This is what makes ON CONFLICT DO NOTHING work in Stage 1
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_silver_city_recorded
+    ON silver.weather_readings (city, recorded_at);
+
+-- Speeds up time-range queries used in Stage 4
+CREATE INDEX IF NOT EXISTS idx_silver_recorded_at
+    ON silver.weather_readings (recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_silver_city_time
+    ON silver.weather_readings (city, recorded_at DESC);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- GOLD LAYER — pre-computed aggregates
+-- Stage 4 writes here. Dashboards and API read ONLY from here.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS gold;
+
+-- Daily summary: one row per city per calendar day
+CREATE TABLE IF NOT EXISTS gold.daily_summary (
+    city             VARCHAR(100) NOT NULL,
+    summary_date     DATE         NOT NULL,
+    avg_temp         NUMERIC(5,2),    -- average temperature °C
+    min_temp         NUMERIC(5,2),    -- daily low °C
+    max_temp         NUMERIC(5,2),    -- daily high °C
+    avg_humidity     NUMERIC(5,2),    -- average humidity %
+    avg_pressure     NUMERIC(7,2),    -- average pressure hPa
+    total_rain       NUMERIC(6,3),    -- total rainfall mm
+    avg_wind_speed   NUMERIC(5,2),    -- average wind m/s
+    avg_wind_gusts   NUMERIC(5,2),    -- average gusts m/s
+    avg_visibility   NUMERIC(8,1),    -- average visibility m
+    dominant_code    SMALLINT,        -- most common WMO code for the day
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (city, summary_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_daily_date
+    ON gold.daily_summary (summary_date DESC);
+
+-- Monthly summary: one row per city per month
+CREATE TABLE IF NOT EXISTS gold.monthly_summary (
+    city           VARCHAR(100) NOT NULL,
+    year           SMALLINT     NOT NULL,
+    month          SMALLINT     NOT NULL CHECK (month BETWEEN 1 AND 12),
+    avg_temp       NUMERIC(5,2),
+    min_temp       NUMERIC(5,2),
+    max_temp       NUMERIC(5,2),
+    total_rain     NUMERIC(7,3),
+    rainy_days     SMALLINT,          -- days where rain > 0.1 mm
+    avg_wind_speed NUMERIC(5,2),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (city, year, month)
+);
+
+-- Temperature anomalies: flags unusual hourly readings
+CREATE TABLE IF NOT EXISTS gold.temperature_anomalies (
+    id           BIGSERIAL    PRIMARY KEY,
+    city         VARCHAR(100) NOT NULL,
+    recorded_at  TIMESTAMPTZ  NOT NULL,
+    temp_celsius NUMERIC(5,2),
+    baseline_avg NUMERIC(5,2),    -- average temp over last 30 days
+    deviation    NUMERIC(5,2),    -- how far this reading is from the average
+    is_anomaly   BOOLEAN      NOT NULL DEFAULT FALSE,
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (city, recorded_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_anomalies_city
+    ON gold.temperature_anomalies (city, detected_at DESC)
+    WHERE is_anomaly = TRUE;
+
+-- Rainfall trends: rolling averages (a view — no storage needed)
+CREATE OR REPLACE VIEW gold.rainfall_trends AS
+SELECT
+    city,
+    summary_date,
+    total_rain,
+    ROUND(
+        AVG(total_rain) OVER (
+            PARTITION BY city
+            ORDER BY summary_date
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        )::NUMERIC, 3
+    ) AS rolling_7d_rain_mm,
+    ROUND(
+        AVG(total_rain) OVER (
+            PARTITION BY city
+            ORDER BY summary_date
+            ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+        )::NUMERIC, 3
+    ) AS rolling_30d_rain_mm
+FROM gold.daily_summary
+ORDER BY city, summary_date DESC;
+
+COMMENT ON TABLE silver.weather_readings IS 'Clean parsed hourly readings. Written by Stage 1.';
+COMMENT ON TABLE gold.daily_summary      IS 'Daily aggregates. Written by Stage 4, read by Stage 5.';
+COMMENT ON TABLE gold.monthly_summary    IS 'Monthly aggregates. Written by Stage 4.';
+COMMENT ON TABLE gold.temperature_anomalies IS 'Hourly readings > 2 std deviations from 30-day mean.';
+
+
+# ==============================================================================
+# FILE: src/db/connection.py
+# WHAT IT DOES: One place in the project to get a database connection.
+#               Every other file imports from here instead of hardcoding config.
+# ==============================================================================
+
+import os
+import logging
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+
+load_dotenv()
+log = logging.getLogger(__name__)
+
+_engine = None  # stored here so we only create it once per process
+
+
+def get_engine():
+    """
+    Returns a SQLAlchemy database engine.
+    The engine is reused across calls (singleton pattern) for efficiency.
+    """
+    global _engine
+    if _engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise EnvironmentError(
+                "DATABASE_URL is not set. "
+                "Add it to your .env file: "
+                "DATABASE_URL=postgresql+psycopg2://user:pass@localhost:5432/weather_db"
+            )
+        _engine = create_engine(url, pool_pre_ping=True, pool_size=5)
+        log.info("DB engine created: %s", url.split("@")[-1])
+    return _engine
+
+
+def check_connection() -> bool:
+    """Returns True if the database is reachable, False otherwise."""
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        log.error("DB connection failed: %s", e)
+        return False
+
+
+################################################################################
+# PART 7 — STAGE 3: INGESTION (AIRFLOW DAGs)
+################################################################################
+#
+#  WHAT THIS STAGE DOES
+#  --------------------
+#  Airflow is like a calendar app for your Python scripts. Instead of running
+#  `python weather_ingest.py` manually, Airflow runs it automatically on a
+#  schedule — every hour, every day, every Monday, etc.
+#
+#  Think of a DAG (Directed Acyclic Graph) as a recipe:
+#    - It lists the steps (tasks)
+#    - It says what order they run in
+#    - It says what to do if a step fails (retry, send email)
+#
+#  WE BUILD THREE DAGs:
+#    1. hourly_ingest.py    → runs every hour automatically
+#    2. backfill.py         → run manually to load 31 days of history
+#    3. daily_transforms.py → runs daily at 01:00 to compute aggregates
+#
+#  VIEW YOUR DAGs at http://localhost:8080 (admin / your password)
+#
+
+
+# ==============================================================================
+# FILE: dags/hourly_ingest.py
+# WHAT IT DOES: Runs weather_ingest.py every hour. Three tasks in order:
+#               check DB is up → fetch data → validate results
+# ==============================================================================
+
+import logging
+from datetime import datetime, timedelta, date
+
+from airflow import DAG
+from airflow.models import Variable
+from airflow.operators.python import PythonOperator
+
+log = logging.getLogger(__name__)
+
+# Settings applied to every task in this DAG
+default_args = {
+    "owner":           "data-team",
+    "retries":         3,                       # retry 3 times if it fails
+    "retry_delay":     timedelta(minutes=5),    # wait 5 min between retries
+    "email_on_failure": True,
+    "email": [Variable.get("ALERT_EMAIL", default_var="admin@example.com")],
+}
+
+with DAG(
+    dag_id="hourly_weather_ingest",
+    default_args=default_args,
+    description="Pulls Open-Meteo data every hour for 5 Kenyan cities",
+    schedule="0 * * * *",    # cron: "at minute 0 of every hour"
+    start_date=datetime(2025, 1, 1),
+    catchup=False,            # don't re-run missed hours if Airflow restarts
+    max_active_runs=1,        # only one run at a time (no overlaps)
+    tags=["weather", "hourly", "bronze", "silver"],
+) as dag:
+
+    # ── Task 1: Make sure PostgreSQL is reachable ─────────────────────────────
+    def task_check_db(**context):
+        from src.db.connection import check_connection
+        if not check_connection():
+            raise ConnectionError("PostgreSQL is not reachable! Check docker compose ps.")
+        log.info("Database OK")
+        return "DB OK"
+
+    check_db = PythonOperator(
+        task_id="check_database",
+        python_callable=task_check_db,
+    )
+
+    # ── Task 2: Fetch data and write to Bronze + Silver ───────────────────────
+    def task_ingest(**context):
+        from generation.weather_ingest import main as ingest
+        ingest(mode="live", dry_run=False)
+        return "Ingest complete"
+
+    ingest_data = PythonOperator(
+        task_id="fetch_and_store",
+        python_callable=task_ingest,
+        execution_timeout=timedelta(minutes=10),
+    )
+
+    # ── Task 3: Confirm data arrived ─────────────────────────────────────────
+    def task_validate(**context):
+        from sqlalchemy import text
+        from src.db.connection import get_engine
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT city, COUNT(*) AS rows
+                FROM silver.weather_readings
+                WHERE recorded_at >= NOW() - INTERVAL '2 hours'
+                GROUP BY city
+                ORDER BY city
+            """))
+            rows = result.fetchall()
+
+        counts = {r[0]: r[1] for r in rows}
+        log.info("Row counts last 2 hours: %s", counts)
+
+        # Push counts to XCom so you can see them in the Airflow UI
+        context["ti"].xcom_push(key="row_counts", value=counts)
+
+        if len(counts) < 5:
+            raise ValueError(
+                f"Only {len(counts)}/5 cities have data. "
+                f"Found: {list(counts.keys())}"
+            )
+        return f"All 5 cities confirmed: {sum(counts.values())} rows"
+
+    validate = PythonOperator(
+        task_id="validate_data",
+        python_callable=task_validate,
+    )
+
+    # ── Task order: check_db → ingest_data → validate ─────────────────────────
+    check_db >> ingest_data >> validate
+
+
+# ==============================================================================
+# FILE: dags/backfill.py
+# WHAT IT DOES: Loads 31 days of historical data. Trigger manually when needed.
+#               Safe to run multiple times — duplicates are skipped automatically.
+# HOW TO TRIGGER: Airflow UI → DAGs → backfill_weather → click ▶ Trigger DAG
+#                 OR: docker compose exec airflow-scheduler airflow dags trigger backfill_weather
+# ==============================================================================
+
+import logging
+from datetime import datetime, timedelta
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.models import Variable
+
+log = logging.getLogger(__name__)
+
+default_args = {
+    "owner":           "data-team",
+    "retries":         2,
+    "retry_delay":     timedelta(minutes=10),
+    "email_on_failure": True,
+    "email": [Variable.get("ALERT_EMAIL", default_var="admin@example.com")],
+}
+
+with DAG(
+    dag_id="backfill_weather",
+    default_args=default_args,
+    description="Loads 31 days of weather history. Trigger manually.",
+    schedule=None,             # None = only runs when YOU trigger it
+    start_date=datetime(2025, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    tags=["weather", "backfill", "manual"],
+) as dag:
+
+    def task_check_db(**context):
+        from src.db.connection import check_connection
+        if not check_connection():
+            raise ConnectionError("Database not reachable")
+        return "DB OK"
+
+    def task_backfill(**context):
+        from generation.weather_ingest import main as ingest
+        log.info("Starting 31-day backfill...")
+        ingest(mode="backfill", dry_run=False)
+        return "Backfill complete"
+
+    def task_validate_backfill(**context):
+        from sqlalchemy import text
+        from src.db.connection import get_engine
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT city, COUNT(*) AS rows
+                FROM silver.weather_readings
+                WHERE recorded_at >= NOW() - INTERVAL '32 days'
+                GROUP BY city ORDER BY city
+            """))
+            rows = {r[0]: r[1] for r in result.fetchall()}
+        total = sum(rows.values())
+        log.info("Backfill complete: %d total rows | %s", total, rows)
+        context["ti"].xcom_push(key="backfill_counts", value=rows)
+        if total < 3000:
+            log.warning("Fewer rows than expected (%d). Check API response.", total)
+        return f"Backfill: {total} rows across {len(rows)} cities"
+
+    check_db = PythonOperator(task_id="check_database",    python_callable=task_check_db)
+    backfill  = PythonOperator(task_id="run_backfill",      python_callable=task_backfill,
+                               execution_timeout=timedelta(minutes=25))
+    validate  = PythonOperator(task_id="validate_backfill", python_callable=task_validate_backfill)
+
+    check_db >> backfill >> validate
+
+
+# ==============================================================================
+# FILE: dags/daily_transforms.py
+# WHAT IT DOES: Runs at 01:00 EAT every day. Takes Silver data and writes
+#               aggregates to Gold (daily summaries, anomalies, monthly).
+# ==============================================================================
+
+import logging
+from datetime import datetime, timedelta, date
+
+from airflow import DAG
+from airflow.models import Variable
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
+
+log = logging.getLogger(__name__)
+
+default_args = {
+    "owner":           "data-team",
+    "retries":         2,
+    "retry_delay":     timedelta(minutes=10),
+    "email_on_failure": True,
+    "email": [Variable.get("ALERT_EMAIL", default_var="admin@example.com")],
+}
+
+with DAG(
+    dag_id="daily_weather_transforms",
+    default_args=default_args,
+    description="Computes daily/monthly summaries and anomaly detection at 01:00 EAT",
+    schedule="0 22 * * *",    # 01:00 EAT = 22:00 UTC (the previous day)
+    start_date=datetime(2025, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    tags=["weather", "transforms", "gold"],
+) as dag:
+
+    def task_check_freshness(**context):
+        """Confirm yesterday's silver data exists before transforming."""
+        from sqlalchemy import text
+        from src.db.connection import get_engine
+        yesterday = date.today() - timedelta(days=1)
+        with get_engine().connect() as conn:
+            result = conn.execute(text("""
+                SELECT city, COUNT(*) FROM silver.weather_readings
+                WHERE DATE(recorded_at AT TIME ZONE 'Africa/Nairobi') = :d
+                GROUP BY city
+            """), {"d": str(yesterday)})
+            rows = result.fetchall()
+        if len(rows) < 5:
+            raise ValueError(f"Only {len(rows)}/5 cities in silver for {yesterday}")
+        log.info("Silver data fresh for %s: %d cities", yesterday, len(rows))
+        return "Silver fresh"
+
+    def task_daily_summary(**context):
+        from transformation.transform_runner import run_daily_summary
+        result = run_daily_summary()
+        context["ti"].xcom_push(key="daily_result", value=result)
+        return str(result)
+
+    def task_anomalies(**context):
+        from transformation.transform_runner import run_anomaly_detection
+        result = run_anomaly_detection()
+        context["ti"].xcom_push(key="anomaly_result", value=result)
+        if result.get("anomalies", 0) > 0:
+            log.warning("⚠️ %d temperature anomalies detected!", result["anomalies"])
+        return str(result)
+
+    def is_first_of_month(**context):
+        """Only run monthly transform on the 1st of the month."""
+        return date.today().day == 1
+
+    def task_monthly_summary(**context):
+        from transformation.transform_runner import run_monthly_summary
+        result = run_monthly_summary()
+        return str(result)
+
+    def task_validate_gold(**context):
+        from transformation.transform_runner import validate_gold
+        result = validate_gold()
+        return str(result)
+
+    check_freshness  = PythonOperator(task_id="check_silver_freshness", python_callable=task_check_freshness)
+    daily_summary    = PythonOperator(task_id="run_daily_summary",       python_callable=task_daily_summary)
+    anomalies        = PythonOperator(task_id="run_anomaly_detection",   python_callable=task_anomalies)
+    monthly_gate     = ShortCircuitOperator(task_id="monthly_gate",      python_callable=is_first_of_month)
+    monthly_summary  = PythonOperator(task_id="run_monthly_summary",     python_callable=task_monthly_summary)
+    validate_gold_t  = PythonOperator(task_id="validate_gold_layer",     python_callable=task_validate_gold)
+
+    check_freshness >> daily_summary >> anomalies >> monthly_gate >> monthly_summary >> validate_gold_t
+
+
+################################################################################
+# PART 8 — STAGE 4: TRANSFORMATION (SILVER → GOLD)
+################################################################################
+#
+#  WHAT THIS STAGE DOES
+#  --------------------
+#  Reads clean hourly data from the Silver layer and computes useful summaries
+#  in the Gold layer. This is where business logic lives:
+#
+#    "What was the average temperature in Nairobi yesterday?"
+#    "How many rainy days did Mombasa have last month?"
+#    "Is this temperature reading unusual for this time of year?"
+#
+#  THREE TRANSFORMS:
+#    daily_summary.sql       → Silver → Gold daily aggregates
+#    monthly_summary.sql     → Gold daily → Gold monthly rollup
+#    anomaly_detection.sql   → Silver → Gold anomaly flags
+#
+#  ABOUT THE SQL:
+#  -------------
+#  ON CONFLICT (city, summary_date) DO UPDATE  means:
+#    "If this city/date row already exists, update it."
+#    "If it doesn't exist, insert it."
+#  This makes all transforms safe to re-run without creating duplicates.
+#
+
+
+# ==============================================================================
+# FILE: transformation/daily_summary.sql
+# WHAT IT DOES: Groups hourly readings by city and day, computes averages.
+#               Runs daily at 01:00 EAT for the previous calendar day.
+# ==============================================================================
+
+-- Group hourly readings into one row per city per day
+-- :target_date is filled in by Python (defaults to yesterday)
+INSERT INTO gold.daily_summary (
+    city, summary_date,
+    avg_temp, min_temp, max_temp,
+    avg_humidity, avg_pressure,
+    total_rain,
+    avg_wind_speed, avg_wind_gusts,
+    avg_visibility, dominant_code,
+    updated_at
+)
+SELECT
+    city,
+    -- AT TIME ZONE 'Africa/Nairobi' converts UTC to local time for correct date grouping
+    DATE(recorded_at AT TIME ZONE 'Africa/Nairobi')         AS summary_date,
+    ROUND(AVG(temp_celsius)::NUMERIC,      2)               AS avg_temp,
+    ROUND(MIN(temp_celsius)::NUMERIC,      2)               AS min_temp,
+    ROUND(MAX(temp_celsius)::NUMERIC,      2)               AS max_temp,
+    ROUND(AVG(humidity_pct)::NUMERIC,      2)               AS avg_humidity,
+    ROUND(AVG(pressure_hpa)::NUMERIC,      2)               AS avg_pressure,
+    ROUND(SUM(rain_mm)::NUMERIC,           3)               AS total_rain,
+    ROUND(AVG(wind_speed_mps)::NUMERIC,    2)               AS avg_wind_speed,
+    ROUND(AVG(wind_gusts_mps)::NUMERIC,    2)               AS avg_wind_gusts,
+    ROUND(AVG(visibility_m)::NUMERIC,      1)               AS avg_visibility,
+    -- MODE() picks the most frequent value — the "main" weather for the day
+    MODE() WITHIN GROUP (ORDER BY weather_code)             AS dominant_code,
+    NOW()
+
+FROM silver.weather_readings
+WHERE DATE(recorded_at AT TIME ZONE 'Africa/Nairobi')
+      = COALESCE(:target_date::DATE, CURRENT_DATE - 1)
+  AND temp_celsius IS NOT NULL
+GROUP BY city, summary_date
+
+-- Safe to re-run: updates existing rows instead of failing
+ON CONFLICT (city, summary_date) DO UPDATE SET
+    avg_temp       = EXCLUDED.avg_temp,
+    min_temp       = EXCLUDED.min_temp,
+    max_temp       = EXCLUDED.max_temp,
+    avg_humidity   = EXCLUDED.avg_humidity,
+    avg_pressure   = EXCLUDED.avg_pressure,
+    total_rain     = EXCLUDED.total_rain,
+    avg_wind_speed = EXCLUDED.avg_wind_speed,
+    avg_wind_gusts = EXCLUDED.avg_wind_gusts,
+    avg_visibility = EXCLUDED.avg_visibility,
+    dominant_code  = EXCLUDED.dominant_code,
+    updated_at     = NOW();
+
+
+# ==============================================================================
+# FILE: transformation/monthly_summary.sql
+# WHAT IT DOES: Reads from gold.daily_summary and computes monthly totals.
+#               Only runs on the 1st of each month (Airflow ShortCircuit).
+# ==============================================================================
+
+INSERT INTO gold.monthly_summary (
+    city, year, month,
+    avg_temp, min_temp, max_temp,
+    total_rain, rainy_days,
+    avg_wind_speed, updated_at
+)
+SELECT
+    city,
+    EXTRACT(YEAR  FROM summary_date)::INT               AS year,
+    EXTRACT(MONTH FROM summary_date)::INT               AS month,
+    ROUND(AVG(avg_temp)::NUMERIC, 2)                    AS avg_temp,
+    ROUND(MIN(min_temp)::NUMERIC, 2)                    AS min_temp,   -- true monthly minimum
+    ROUND(MAX(max_temp)::NUMERIC, 2)                    AS max_temp,   -- true monthly maximum
+    ROUND(SUM(total_rain)::NUMERIC, 3)                  AS total_rain,
+    -- Count days where rain was more than trace (> 0.1 mm)
+    SUM(CASE WHEN total_rain > 0.1 THEN 1 ELSE 0 END)  AS rainy_days,
+    ROUND(AVG(avg_wind_speed)::NUMERIC, 2)              AS avg_wind_speed,
+    NOW()
+
+FROM gold.daily_summary
+WHERE EXTRACT(YEAR  FROM summary_date) = COALESCE(:target_year::INT,  EXTRACT(YEAR  FROM CURRENT_DATE - INTERVAL '1 month'))
+  AND EXTRACT(MONTH FROM summary_date) = COALESCE(:target_month::INT, EXTRACT(MONTH FROM CURRENT_DATE - INTERVAL '1 month'))
+GROUP BY city, year, month
+
+ON CONFLICT (city, year, month) DO UPDATE SET
+    avg_temp       = EXCLUDED.avg_temp,
+    min_temp       = EXCLUDED.min_temp,
+    max_temp       = EXCLUDED.max_temp,
+    total_rain     = EXCLUDED.total_rain,
+    rainy_days     = EXCLUDED.rainy_days,
+    avg_wind_speed = EXCLUDED.avg_wind_speed,
+    updated_at     = NOW();
+
+
+# ==============================================================================
+# FILE: transformation/anomaly_detection.sql
+# WHAT IT DOES: Flags temperature readings that deviate more than 2 standard
+#               deviations from the city's 30-day rolling average.
+#
+#  WHAT IS A STANDARD DEVIATION?
+#  If Nairobi's average temperature is 19°C with a stddev of 2°C,
+#  then 2 standard deviations = 4°C.
+#  Any reading below 15°C or above 23°C would be flagged as an anomaly.
+# ==============================================================================
+
+WITH baseline AS (
+    -- Compute average and spread for each city over the last 30 days
+    SELECT
+        city,
+        AVG(temp_celsius)                               AS baseline_avg,
+        -- If we have < 48 readings (< 2 days), use 1.5°C as a safe default
+        CASE WHEN COUNT(*) < 48 THEN 1.5
+             ELSE STDDEV(temp_celsius)
+        END                                             AS effective_std
+    FROM silver.weather_readings
+    WHERE recorded_at >= NOW() - INTERVAL '30 days'
+      AND temp_celsius IS NOT NULL
+    GROUP BY city
+)
+
+INSERT INTO gold.temperature_anomalies (
+    city, recorded_at, temp_celsius,
+    baseline_avg, deviation, is_anomaly, detected_at
+)
+SELECT
+    r.city,
+    r.recorded_at,
+    r.temp_celsius,
+    ROUND(b.baseline_avg::NUMERIC,                    2) AS baseline_avg,
+    ROUND((r.temp_celsius - b.baseline_avg)::NUMERIC, 2) AS deviation,
+    -- is_anomaly = TRUE when the reading is more than 2 standard deviations away
+    ABS(r.temp_celsius - b.baseline_avg) > (2.0 * b.effective_std) AS is_anomaly,
+    NOW()
+
+FROM silver.weather_readings r
+JOIN baseline b ON r.city = b.city
+WHERE r.recorded_at >= NOW() - INTERVAL '25 hours'
+
+ON CONFLICT (city, recorded_at) DO UPDATE SET
+    temp_celsius  = EXCLUDED.temp_celsius,
+    baseline_avg  = EXCLUDED.baseline_avg,
+    deviation     = EXCLUDED.deviation,
+    is_anomaly    = EXCLUDED.is_anomaly,
+    detected_at   = EXCLUDED.detected_at;
+
+
+# ==============================================================================
+# FILE: transformation/transform_runner.py
+# WHAT IT DOES: Python wrapper that reads the SQL files and runs them.
+#               Called by Airflow DAG tasks and also from the command line.
+# HOW TO RUN:   python -m transformation.transform_runner --transform all
+# ==============================================================================
+
+import logging
+import argparse
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Optional
+
+from sqlalchemy import text
+from src.db.connection import get_engine
+
+log = logging.getLogger(__name__)
+
+# Path to the SQL files
+SQL_DIR = Path(__file__).parent
+
+
+def _run_sql(sql: str, params: dict, label: str) -> int:
+    """
+    Executes a SQL string inside a transaction.
+    Returns the number of rows affected.
+    If anything fails, the transaction is rolled back automatically.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(text(sql), params)
+        count = result.rowcount if result.rowcount >= 0 else -1
+        log.info("[%s] rows affected: %s", label, count)
+        return count
+
+
+def _load(filename: str) -> str:
+    """Read a SQL file from the transforms folder."""
+    path = SQL_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"SQL file not found: {path}")
+    return path.read_text()
+
+
+def run_daily_summary(target_date: Optional[date] = None) -> dict:
+    """
+    Compute daily aggregates for target_date (default: yesterday).
+    Writes 5 rows to gold.daily_summary (one per city).
+    """
+    target_date = target_date or date.today() - timedelta(days=1)
+    log.info("Running daily summary for %s ...", target_date)
+    sql  = _load("daily_summary.sql")
+    rows = _run_sql(sql, {"target_date": str(target_date)}, "daily_summary")
+    return {"transform": "daily_summary", "date": str(target_date), "rows": rows}
+
+
+def run_monthly_summary(year: int = None, month: int = None) -> dict:
+    """
+    Compute monthly aggregates (default: previous calendar month).
+    Only writes rows when all daily data for that month is in gold.daily_summary.
+    """
+    if not year or not month:
+        prev = (date.today().replace(day=1) - timedelta(days=1))
+        year, month = prev.year, prev.month
+    log.info("Running monthly summary for %04d-%02d ...", year, month)
+    sql  = _load("monthly_summary.sql")
+    rows = _run_sql(sql, {"target_year": year, "target_month": month}, "monthly_summary")
+    return {"transform": "monthly_summary", "period": f"{year:04d}-{month:02d}", "rows": rows}
+
+
+def run_anomaly_detection() -> dict:
+    """
+    Flag hourly readings from the last 25 hours as anomalies if they are
+    more than 2 standard deviations from the 30-day baseline.
+    """
+    log.info("Running anomaly detection ...")
+    sql  = _load("anomaly_detection.sql")
+    rows = _run_sql(sql, {}, "anomaly_detection")
+
+    # Count how many were actually flagged
+    with get_engine().connect() as conn:
+        flagged = conn.execute(text("""
+            SELECT COUNT(*) FROM gold.temperature_anomalies
+            WHERE is_anomaly = TRUE AND detected_at >= NOW() - INTERVAL '25 hours'
+        """)).scalar()
+
+    return {"transform": "anomaly_detection", "rows": rows, "anomalies": flagged}
+
+
+def validate_gold() -> dict:
+    """Check that gold.daily_summary has rows for yesterday."""
+    yesterday = date.today() - timedelta(days=1)
+    with get_engine().connect() as conn:
+        result = conn.execute(text("""
+            SELECT city, avg_temp, total_rain
+            FROM gold.daily_summary
+            WHERE summary_date = :d ORDER BY city
+        """), {"d": str(yesterday)})
+        rows = result.fetchall()
+
+    found = [r[0] for r in rows]
+    missing = [c for c in ["Eldoret","Kisumu","Mombasa","Nairobi","Nakuru"] if c not in found]
+
+    if missing:
+        raise ValueError(f"Gold missing cities for {yesterday}: {missing}")
+
+    log.info("Gold validation OK for %s: %d cities", yesterday, len(rows))
+    return {"date": str(yesterday), "cities": found}
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(description="Run weather transforms")
+    parser.add_argument("--transform", choices=["daily","monthly","anomalies","all"], default="all")
+    parser.add_argument("--date",  help="YYYY-MM-DD for daily transform")
+    parser.add_argument("--year",  type=int)
+    parser.add_argument("--month", type=int)
+    args = parser.parse_args()
+
+    target = date.fromisoformat(args.date) if args.date else None
+    if args.transform in ("daily",    "all"): run_daily_summary(target)
+    if args.transform in ("anomalies","all"): run_anomaly_detection()
+    if args.transform in ("monthly",  "all"): run_monthly_summary(args.year, args.month)
+    if args.transform == "all":               validate_gold()
+
+
+################################################################################
+# PART 9 — STAGE 5: SERVING (PYTHON DASHBOARD + FLASK API)
+################################################################################
+#
+#  WHAT THIS STAGE DOES
+#  --------------------
+#  Makes the Gold layer data visible to humans and other software.
+#  Two tools, both pure Python — no external services needed:
+#
+#    dashboard.py  → Plotly Dash interactive web app  (port 8050)
+#                    Replaces Grafana entirely
+#                    Run: python serving/dashboard.py
+#
+#    api.py        → Flask REST API                   (port 5000)
+#                    Run: python serving/api.py
+#
+#  WHY PLOTLY DASH INSTEAD OF GRAFANA?
+#  -------------------------------------
+#  Grafana requires configuration files, Docker, and learning its own query
+#  language. Plotly Dash is just Python — if you know Python, you can build
+#  interactive charts in the same language as the rest of the project.
+#
+#  DASHBOARD TABS:
+#    📊 Overview    → Stat cards showing today's conditions per city
+#    🌡️ Temperature → 30-day temperature trend line chart
+#    🌧️ Rainfall    → Daily and rolling average rainfall charts
+#    ⚠️ Anomalies   → Table of flagged temperature readings
+#    📅 Monthly     → Monthly summaries per city
+#
+
+
+# ==============================================================================
+# FILE: serving/dashboard.py
+# WHAT IT DOES: Interactive web dashboard showing all Gold layer metrics.
+# HOW TO RUN:   python serving/dashboard.py
+#               Then open: http://localhost:8050
+# ==============================================================================
+
+import os
+import logging
+from datetime import date, timedelta
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, dcc, html, Input, Output, dash_table
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+
+load_dotenv()
+log = logging.getLogger(__name__)
+
+# ── Database connection ───────────────────────────────────────────────────────
+engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+
+# ── WMO weather code → readable label ────────────────────────────────────────
+WMO = {
+    0:"Clear",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",
+    45:"Fog",48:"Rime fog",51:"Light drizzle",53:"Drizzle",55:"Dense drizzle",
+    61:"Slight rain",63:"Rain",65:"Heavy rain",
+    80:"Rain showers",81:"Mod. showers",82:"Heavy showers",95:"Thunderstorm",
+}
+
+# ── Colour palette per city ───────────────────────────────────────────────────
+CITY_COLORS = {
+    "Nairobi":"#2196F3","Mombasa":"#FF5722","Kisumu":"#4CAF50",
+    "Nakuru":"#9C27B0","Eldoret":"#FF9800",
+}
+
+# ── Helper: run a query and return a DataFrame ────────────────────────────────
+def query(sql: str, params: dict = {}) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+# ── App setup ─────────────────────────────────────────────────────────────────
+app = Dash(__name__, title="🌦️ Kenya Weather Dashboard")
+
+app.layout = html.Div(
+    style={"fontFamily": "Segoe UI, Arial, sans-serif", "backgroundColor": "#f5f7fa", "minHeight": "100vh"},
+    children=[
+
+        # Header
+        html.Div(
+            style={"background": "linear-gradient(135deg,#1a237e,#0d47a1)", "color": "white", "padding": "24px 32px"},
+            children=[
+                html.H1("🌦️ Kenya Weather Data Warehouse", style={"margin": 0, "fontSize": "28px"}),
+                html.P("Live pipeline · Medallion Architecture · 5 Cities", style={"margin": "4px 0 0", "opacity": 0.8}),
+            ]
+        ),
+
+        # Tabs
+        dcc.Tabs(
+            style={"margin": "16px"},
+            children=[
+
+                # ─── TAB 1: Overview ─────────────────────────────────────────
+                dcc.Tab(label="📊 Overview", children=[
+                    html.Div(id="overview-cards", style={"padding": "16px"}),
+                    dcc.Interval(id="refresh", interval=3600_000, n_intervals=0),  # refresh hourly
+                ]),
+
+                # ─── TAB 2: Temperature ───────────────────────────────────────
+                dcc.Tab(label="🌡️ Temperature", children=[
+                    html.Div(style={"padding": "16px"}, children=[
+                        html.Label("Select cities:"),
+                        dcc.Checklist(
+                            id="temp-city-filter",
+                            options=[{"label": c, "value": c} for c in CITY_COLORS],
+                            value=list(CITY_COLORS.keys()),
+                            inline=True,
+                            style={"margin": "8px 0"},
+                        ),
+                        dcc.Graph(id="temp-chart"),
+                        dcc.Graph(id="temp-range-chart"),
+                    ])
+                ]),
+
+                # ─── TAB 3: Rainfall ─────────────────────────────────────────
+                dcc.Tab(label="🌧️ Rainfall", children=[
+                    html.Div(style={"padding": "16px"}, children=[
+                        dcc.Graph(id="rainfall-bar"),
+                        dcc.Graph(id="rainfall-rolling"),
+                    ])
+                ]),
+
+                # ─── TAB 4: Anomalies ────────────────────────────────────────
+                dcc.Tab(label="⚠️ Anomalies", children=[
+                    html.Div(style={"padding": "16px"}, children=[
+                        html.H3("Temperature Anomalies — Last 7 Days"),
+                        html.P("Readings where temperature deviated more than 2σ from the 30-day baseline."),
+                        dcc.Graph(id="anomaly-scatter"),
+                        html.Div(id="anomaly-table", style={"marginTop": "16px"}),
+                    ])
+                ]),
+
+                # ─── TAB 5: Monthly ──────────────────────────────────────────
+                dcc.Tab(label="📅 Monthly", children=[
+                    html.Div(style={"padding": "16px"}, children=[
+                        dcc.Graph(id="monthly-temp"),
+                        dcc.Graph(id="monthly-rain"),
+                    ])
+                ]),
+
+            ]
+        )
+    ]
+)
+
+
+# ── Callback: Overview cards ──────────────────────────────────────────────────
+@app.callback(Output("overview-cards", "children"), Input("refresh", "n_intervals"))
+def update_overview(_):
+    df = query("""
+        SELECT city, summary_date, avg_temp, min_temp, max_temp,
+               total_rain, avg_humidity, avg_wind_speed, dominant_code
+        FROM gold.daily_summary
+        WHERE summary_date = CURRENT_DATE - 1
+        ORDER BY city
+    """)
+
+    if df.empty:
+        return html.P("No data yet. Run: python generation/weather_ingest.py", style={"color":"red"})
+
+    cards = []
+    for _, row in df.iterrows():
+        city   = row["city"]
+        color  = CITY_COLORS.get(city, "#607d8b")
+        code   = int(row["dominant_code"]) if pd.notna(row["dominant_code"]) else 0
+        label  = WMO.get(code, "Unknown")
+
+        cards.append(html.Div(
+            style={
+                "background": "white", "borderRadius": "12px", "padding": "20px",
+                "boxShadow": "0 2px 8px rgba(0,0,0,0.1)", "borderTop": f"4px solid {color}",
+                "minWidth": "200px", "flex": "1",
+            },
+            children=[
+                html.H3(city, style={"color": color, "margin": "0 0 8px"}),
+                html.Div(f"{row['avg_temp']:.1f}°C", style={"fontSize":"36px","fontWeight":"bold","color":"#333"}),
+                html.Div(f"↓ {row['min_temp']:.1f}°  ↑ {row['max_temp']:.1f}°", style={"color":"#666","fontSize":"13px"}),
+                html.Hr(style={"border":"none","borderTop":"1px solid #eee","margin":"10px 0"}),
+                html.Div([
+                    html.Span(f"💧 {row['total_rain']:.1f} mm rain"),
+                    html.Br(),
+                    html.Span(f"💨 {row['avg_wind_speed']:.1f} m/s wind"),
+                    html.Br(),
+                    html.Span(f"🌤 {label}"),
+                ], style={"fontSize":"13px","color":"#555","lineHeight":"1.8"}),
+                html.Div(f"{row['summary_date']}", style={"marginTop":"10px","fontSize":"11px","color":"#999"}),
+            ]
+        ))
+
+    return html.Div([
+        html.H3("Yesterday's Conditions", style={"padding":"0 4px","color":"#333"}),
+        html.Div(cards, style={"display":"flex","gap":"16px","flexWrap":"wrap"}),
+    ])
+
+
+# ── Callback: Temperature trend ───────────────────────────────────────────────
+@app.callback(
+    [Output("temp-chart", "figure"), Output("temp-range-chart", "figure")],
+    Input("temp-city-filter", "value"),
+)
+def update_temperature(cities):
+    if not cities:
+        return {}, {}
+
+    df = query("""
+        SELECT city, summary_date, avg_temp, min_temp, max_temp
+        FROM gold.daily_summary
+        WHERE summary_date >= CURRENT_DATE - 30
+          AND city = ANY(:cities)
+        ORDER BY city, summary_date
+    """, {"cities": cities})
+
+    fig1 = px.line(
+        df, x="summary_date", y="avg_temp", color="city",
+        title="Average Daily Temperature — Last 30 Days",
+        labels={"summary_date": "Date", "avg_temp": "Avg Temp (°C)", "city": "City"},
+        color_discrete_map=CITY_COLORS,
+    )
+    fig1.update_layout(plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
+
+    fig2 = go.Figure()
+    for city in cities:
+        c_df = df[df["city"] == city]
+        color = CITY_COLORS.get(city, "#607d8b")
+        # Shaded band between min and max
+        fig2.add_trace(go.Scatter(
+            x=list(c_df["summary_date"]) + list(c_df["summary_date"])[::-1],
+            y=list(c_df["max_temp"]) + list(c_df["min_temp"])[::-1],
+            fill="toself", fillcolor=color, opacity=0.15,
+            line=dict(color="rgba(0,0,0,0)"), name=f"{city} range", showlegend=False,
+        ))
+        fig2.add_trace(go.Scatter(
+            x=c_df["summary_date"], y=c_df["avg_temp"],
+            line=dict(color=color, width=2), name=city,
+        ))
+    fig2.update_layout(
+        title="Temperature Range (Min–Avg–Max) — Last 30 Days",
+        xaxis_title="Date", yaxis_title="Temperature (°C)",
+        plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
+    )
+
+    return fig1, fig2
+
+
+# ── Callback: Rainfall charts ─────────────────────────────────────────────────
+@app.callback(
+    [Output("rainfall-bar", "figure"), Output("rainfall-rolling", "figure")],
+    Input("refresh", "n_intervals"),
+)
+def update_rainfall(_):
+    df = query("""
+        SELECT city, summary_date, total_rain, rolling_7d_rain_mm, rolling_30d_rain_mm
+        FROM gold.rainfall_trends
+        WHERE summary_date >= CURRENT_DATE - 30
+        ORDER BY city, summary_date
+    """)
+
+    fig1 = px.bar(
+        df, x="summary_date", y="total_rain", color="city",
+        title="Daily Rainfall by City — Last 30 Days",
+        labels={"summary_date": "Date", "total_rain": "Rain (mm)", "city": "City"},
+        color_discrete_map=CITY_COLORS, barmode="group",
+    )
+    fig1.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+
+    fig2 = px.line(
+        df, x="summary_date", y="rolling_7d_rain_mm", color="city",
+        title="7-Day Rolling Average Rainfall",
+        labels={"summary_date": "Date", "rolling_7d_rain_mm": "7-Day Avg Rain (mm)", "city": "City"},
+        color_discrete_map=CITY_COLORS,
+    )
+    fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+
+    return fig1, fig2
+
+
+# ── Callback: Anomaly scatter + table ────────────────────────────────────────
+@app.callback(
+    [Output("anomaly-scatter", "figure"), Output("anomaly-table", "children")],
+    Input("refresh", "n_intervals"),
+)
+def update_anomalies(_):
+    df = query("""
+        SELECT city, recorded_at AT TIME ZONE 'Africa/Nairobi' AS local_time,
+               temp_celsius, baseline_avg, deviation, is_anomaly
+        FROM gold.temperature_anomalies
+        WHERE detected_at >= NOW() - INTERVAL '7 days'
+        ORDER BY ABS(deviation) DESC
+        LIMIT 200
+    """)
+
+    if df.empty:
+        return {}, html.P("No anomaly data yet.")
+
+    df["status"] = df["is_anomaly"].map({True: "⚠️ Anomaly", False: "Normal"})
+
+    fig = px.scatter(
+        df, x="local_time", y="temp_celsius", color="status", symbol="city",
+        title="Temperature Readings vs Baseline — Last 7 Days",
+        labels={"local_time": "Time (EAT)", "temp_celsius": "Temperature (°C)"},
+        color_discrete_map={"⚠️ Anomaly": "#f44336", "Normal": "#90CAF9"},
+        hover_data=["city", "baseline_avg", "deviation"],
+    )
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+
+    # Show only anomalies in the table
+    anomaly_df = df[df["is_anomaly"]].copy()
+    anomaly_df["local_time"] = anomaly_df["local_time"].astype(str).str[:16]
+
+    table = dash_table.DataTable(
+        data=anomaly_df[["city","local_time","temp_celsius","baseline_avg","deviation"]].to_dict("records"),
+        columns=[
+            {"name": "City",         "id": "city"},
+            {"name": "Time (EAT)",   "id": "local_time"},
+            {"name": "Temp (°C)",    "id": "temp_celsius"},
+            {"name": "Baseline (°C)","id": "baseline_avg"},
+            {"name": "Deviation",    "id": "deviation"},
+        ],
+        style_cell={"textAlign": "left", "padding": "8px"},
+        style_header={"backgroundColor": "#1a237e", "color": "white", "fontWeight": "bold"},
+        style_data_conditional=[
+            {"if": {"filter_query": "{deviation} > 3"}, "backgroundColor": "#ffebee"},
+            {"if": {"filter_query": "{deviation} < -3"}, "backgroundColor": "#e3f2fd"},
+        ],
+        page_size=10,
+        sort_action="native",
+    )
+
+    return fig, html.Div([html.H4("Anomaly Details"), table])
+
+
+# ── Callback: Monthly charts ──────────────────────────────────────────────────
+@app.callback(
+    [Output("monthly-temp", "figure"), Output("monthly-rain", "figure")],
+    Input("refresh", "n_intervals"),
+)
+def update_monthly(_):
+    df = query("""
+        SELECT city,
+               TO_DATE(year::TEXT || '-' || LPAD(month::TEXT,2,'0') || '-01', 'YYYY-MM-DD') AS period,
+               avg_temp, min_temp, max_temp, total_rain, rainy_days
+        FROM gold.monthly_summary
+        ORDER BY city, period DESC
+        LIMIT 60
+    """)
+
+    if df.empty:
+        return {}, {}
+
+    fig1 = px.bar(
+        df, x="period", y="avg_temp", color="city",
+        title="Monthly Average Temperature",
+        labels={"period": "Month", "avg_temp": "Avg Temp (°C)", "city": "City"},
+        color_discrete_map=CITY_COLORS, barmode="group",
+    )
+    fig1.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+
+    fig2 = px.bar(
+        df, x="period", y="total_rain", color="city",
+        title="Monthly Total Rainfall",
+        labels={"period": "Month", "total_rain": "Total Rain (mm)", "city": "City"},
+        color_discrete_map=CITY_COLORS, barmode="group",
+    )
+    fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+
+    return fig1, fig2
+
+
+if __name__ == "__main__":
+    print("Starting dashboard at http://localhost:8050")
+    app.run(debug=True, port=8050)
+
+
+# ==============================================================================
+# FILE: serving/api.py
+# WHAT IT DOES: Simple Flask REST API exposing the Gold layer as JSON.
+# HOW TO RUN:   python serving/api.py
+#               Then: curl http://localhost:5000/api/cities
+# ==============================================================================
+
+import os
+from datetime import date, timedelta
+from flask import Flask, jsonify, request, Response
+from sqlalchemy import create_engine, text
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app   = Flask(__name__)
+engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+
+CITIES = {"Nairobi","Mombasa","Kisumu","Nakuru","Eldoret"}
+
+def db_query(sql: str, params: dict = {}) -> list:
+    """Run a SQL query and return results as a list of dicts."""
+    with engine.connect() as conn:
+        result = conn.execute(text(sql), params)
+        cols   = result.keys()
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+
+# ── Health check ─────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    try:
+        with engine.connect() as conn:
+            latest = conn.execute(text("SELECT MAX(updated_at)::TEXT FROM gold.daily_summary")).scalar()
+        return jsonify({"status": "ok", "latest_gold_update": latest})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ── List all cities ──────────────────────────────────────────────────────────
+@app.get("/api/cities")
+def cities():
+    rows = db_query("SELECT DISTINCT city FROM gold.daily_summary ORDER BY city")
+    return jsonify({"cities": [r["city"] for r in rows]})
+
+
+# ── Current conditions (yesterday's summary) ─────────────────────────────────
+@app.get("/api/weather/current/<city>")
+def current(city: str):
+    city = city.strip().title()
+    if city not in CITIES:
+        return jsonify({"error": f"Unknown city: {city}"}), 404
+    rows = db_query("""
+        SELECT * FROM gold.daily_summary
+        WHERE city = :city ORDER BY summary_date DESC LIMIT 1
+    """, {"city": city})
+    if not rows:
+        return jsonify({"error": "No data found"}), 404
+    # Convert date to string for JSON
+    rows[0]["summary_date"] = str(rows[0]["summary_date"])
+    rows[0]["updated_at"]   = str(rows[0]["updated_at"])
+    return jsonify(rows[0])
+
+
+# ── Daily summary with optional date range ───────────────────────────────────
+@app.get("/api/weather/daily/<city>")
+def daily(city: str):
+    city      = city.strip().title()
+    from_date = request.args.get("from_date", str(date.today() - timedelta(days=30)))
+    to_date   = request.args.get("to_date",   str(date.today() - timedelta(days=1)))
+    rows      = db_query("""
+        SELECT * FROM gold.daily_summary
+        WHERE city = :city AND summary_date BETWEEN :f AND :t
+        ORDER BY summary_date DESC
+    """, {"city": city, "f": from_date, "t": to_date})
+    for r in rows:
+        r["summary_date"] = str(r["summary_date"])
+        r["updated_at"]   = str(r["updated_at"])
+    return jsonify({"city": city, "count": len(rows), "data": rows})
+
+
+# ── Monthly summary ──────────────────────────────────────────────────────────
+@app.get("/api/weather/monthly/<city>")
+def monthly(city: str):
+    city = city.strip().title()
+    rows = db_query("""
+        SELECT * FROM gold.monthly_summary
+        WHERE city = :city ORDER BY year DESC, month DESC LIMIT 12
+    """, {"city": city})
+    for r in rows:
+        r["updated_at"] = str(r["updated_at"])
+    return jsonify({"city": city, "data": rows})
+
+
+# ── Recent anomalies ─────────────────────────────────────────────────────────
+@app.get("/api/weather/anomalies")
+def anomalies():
+    city  = request.args.get("city")
+    hours = int(request.args.get("hours", 48))
+    clause = "AND city = :city" if city else ""
+    rows  = db_query(f"""
+        SELECT city, recorded_at AT TIME ZONE 'Africa/Nairobi' AS local_time,
+               temp_celsius, baseline_avg, deviation, is_anomaly
+        FROM gold.temperature_anomalies
+        WHERE detected_at >= NOW() - INTERVAL '{hours} hours'
+          AND is_anomaly = TRUE {clause}
+        ORDER BY ABS(deviation) DESC LIMIT 100
+    """, {"city": city} if city else {})
+    for r in rows:
+        r["local_time"] = str(r["local_time"])
+    return jsonify({"count": len(rows), "data": rows})
+
+
+# ── All-city comparison for one date ─────────────────────────────────────────
+@app.get("/api/weather/compare")
+def compare():
+    d = request.args.get("date", str(date.today() - timedelta(days=1)))
+    rows = db_query("""
+        SELECT * FROM gold.daily_summary WHERE summary_date = :d ORDER BY city
+    """, {"d": d})
+    for r in rows:
+        r["summary_date"] = str(r["summary_date"])
+        r["updated_at"]   = str(r["updated_at"])
+    return jsonify({"date": d, "cities": rows})
+
+
+# ── CSV export ───────────────────────────────────────────────────────────────
+@app.get("/api/export/csv")
+def export_csv():
+    city      = request.args.get("city")
+    from_date = request.args.get("from_date", str(date.today() - timedelta(days=30)))
+    to_date   = request.args.get("to_date",   str(date.today() - timedelta(days=1)))
+    clause    = "AND city = :city" if city else ""
+    with engine.connect() as conn:
+        df = pd.read_sql(text(f"""
+            SELECT * FROM gold.daily_summary
+            WHERE summary_date BETWEEN :f AND :t {clause}
+            ORDER BY city, summary_date
+        """), conn, params={"f": from_date, "t": to_date, "city": city} if city
+             else {"f": from_date, "t": to_date})
+    csv = df.to_csv(index=False)
+    return Response(csv, mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment;filename=weather_{from_date}_{to_date}.csv"})
+
+
+if __name__ == "__main__":
+    print("Starting API at http://localhost:5000")
+    print("Try: curl http://localhost:5000/api/cities")
+    app.run(debug=True, port=5000)
+
+
+# ==============================================================================
+# FILE: serving/reports.py
+# WHAT IT DOES: Generates a weekly HTML report and emails it.
+#               Run manually or via the weekly_digest Airflow DAG.
+# HOW TO RUN:   python serving/reports.py
+# ==============================================================================
+
+import os
+import smtplib
+import logging
+from datetime import date, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import pandas as pd
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+
+load_dotenv()
+log = logging.getLogger(__name__)
+
+engine = create_engine(os.environ["DATABASE_URL"])
+
+
+def generate_weekly_report() -> str:
+    """Build a simple HTML report for the past 7 days."""
+    week_end   = date.today() - timedelta(days=1)
+    week_start = week_end - timedelta(days=6)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(text("""
+            SELECT city,
+                   ROUND(AVG(avg_temp)::NUMERIC,1)  AS avg_temp,
+                   ROUND(MIN(min_temp)::NUMERIC,1)  AS min_temp,
+                   ROUND(MAX(max_temp)::NUMERIC,1)  AS max_temp,
+                   ROUND(SUM(total_rain)::NUMERIC,1) AS total_rain,
+                   SUM(CASE WHEN total_rain > 0.1 THEN 1 ELSE 0 END) AS rainy_days
+            FROM gold.daily_summary
+            WHERE summary_date BETWEEN :s AND :e
+            GROUP BY city ORDER BY city
+        """), conn, params={"s": week_start, "e": week_end})
+
+    rows = "".join(
+        f"<tr><td><b>{r.city}</b></td>"
+        f"<td>{r.avg_temp}°C</td>"
+        f"<td>{r.min_temp}°C</td>"
+        f"<td>{r.max_temp}°C</td>"
+        f"<td>{r.total_rain} mm</td>"
+        f"<td>{int(r.rainy_days)} days</td></tr>"
+        for r in df.itertuples()
+    )
+
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto">
+      <h2 style="color:#1a237e">🌦️ Kenya Weather — Weekly Report</h2>
+      <p>Week: <b>{week_start}</b> to <b>{week_end}</b></p>
+      <table border="1" cellpadding="8" cellspacing="0" width="100%"
+             style="border-collapse:collapse">
+        <thead style="background:#1a237e;color:white">
+          <tr><th>City</th><th>Avg</th><th>Min</th><th>Max</th>
+              <th>Rain</th><th>Rainy Days</th></tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <p style="font-size:11px;color:#888;margin-top:20px">
+        Generated by Weather Data Warehouse · Open-Meteo · PostgreSQL
+      </p>
+    </body></html>
+    """
+
+
+def send_email_report(recipients: list[str]) -> None:
+    """Send the weekly HTML report by email."""
+    html = generate_weekly_report()
+    end  = date.today() - timedelta(days=1)
+
+    msg            = MIMEMultipart("alternative")
+    msg["Subject"] = f"Kenya Weather Report — week ending {end}"
+    msg["From"]    = os.environ["SMTP_USER"]
+    msg["To"]      = ", ".join(recipients)
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ.get("SMTP_PORT", 587))) as s:
+        s.starttls()
+        s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
+        s.sendmail(os.environ["SMTP_USER"], recipients, msg.as_string())
+
+    log.info("Weekly report sent to %s", recipients)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    # Print the HTML to terminal (for testing)
+    print(generate_weekly_report())
+
+
+# ==============================================================================
+# FILE: dags/weekly_digest.py
+# WHAT IT DOES: Sends the weekly email report every Monday at 07:00 EAT.
+# ==============================================================================
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.models import Variable
+
+with DAG(
+    dag_id="weekly_weather_digest",
+    default_args={"owner": "data-team", "retries": 2, "retry_delay": timedelta(minutes=10)},
+    description="Sends weekly HTML email report every Monday 07:00 EAT",
+    schedule="0 4 * * 1",   # 07:00 EAT = 04:00 UTC, Monday
+    start_date=datetime(2025, 1, 1),
+    catchup=False,
+    tags=["weather", "notifications"],
+) as dag:
+
+    def send_report(**context):
+        from serving.reports import send_email_report
+        recipients = Variable.get("ALERT_EMAIL", default_var="admin@example.com").split(",")
+        send_email_report(recipients)
+        return f"Report sent to {recipients}"
+
+    PythonOperator(task_id="send_weekly_report", python_callable=send_report)
+
+
+################################################################################
+# PART 10 — STEP-BY-STEP TUTORIAL
+################################################################################
+#
+#  COMPLETE SETUP FROM ZERO TO RUNNING DASHBOARD
+#  Follow these steps in order. Each step builds on the last.
+#
+#
+#  ── PREREQUISITES ──────────────────────────────────────────────────────────
+#
+#  Install these first if you do not have them:
+#    • Python 3.11   → https://www.python.org/downloads/
+#    • Docker Desktop → https://www.docker.com/products/docker-desktop/
+#    • Git            → https://git-scm.com/downloads
+#
+#
+#  ── STEP 1: GET THE CODE ────────────────────────────────────────────────────
+#
+#    git clone https://github.com/yourhandle/weather-data-warehouse.git
+#    cd weather-data-warehouse
+#
+#
+#  ── STEP 2: CREATE YOUR ENVIRONMENT FILE ───────────────────────────────────
+#
+#    cp .env.example .env
+#
+#    Open .env and fill in:
+#      POSTGRES_PASSWORD = anything strong, e.g. "MyWeatherPass123!"
+#      DATABASE_URL      = same password: postgresql+psycopg2://weather_admin:MyWeatherPass123!@localhost:5432/weather_db
+#
+#    For Airflow Fernet key (run in Python):
+#      python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#      Copy the output into AIRFLOW_FERNET_KEY in .env
+#
+#    For Airflow secret key (run in Python):
+#      python -c "import secrets; print(secrets.token_hex(32))"
+#      Copy the output into AIRFLOW_SECRET_KEY in .env
+#
+#
+#  ── STEP 3: INSTALL PYTHON PACKAGES ────────────────────────────────────────
+#
+#    python -m venv .venv
+#    source .venv/bin/activate          # Windows: .venv\Scripts\activate
+#    pip install -r requirements.txt
+#
+#
+#  ── STEP 4: START DOCKER SERVICES ──────────────────────────────────────────
+#
+#    docker compose up -d
+#
+#    This starts:
+#      - PostgreSQL on port 5432
+#      - Airflow webserver on port 8080
+#      - Airflow scheduler (runs DAGs in background)
+#
+#    Wait about 60 seconds then check everything is running:
+#      docker compose ps
+#
+#    You should see all containers as "Up" or "healthy"
+#
+#    The init_db.sql file runs automatically, creating all Bronze/Silver/Gold
+#    schemas and tables. You do NOT need to run it manually.
+#
+#
+#  ── STEP 5: CONFIGURE AIRFLOW ──────────────────────────────────────────────
+#
+#    bash scripts/setup_airflow.sh
+#
+#    This tells Airflow where your database is and sets alert email.
+#
+#    Open the Airflow UI: http://localhost:8080
+#    Login: admin / your AIRFLOW_ADMIN_PASSWORD from .env
+#
+#    You should see these DAGs listed:
+#      ✓ hourly_weather_ingest
+#      ✓ backfill_weather
+#      ✓ daily_weather_transforms
+#      ✓ weekly_weather_digest
+#
+#
+#  ── STEP 6: TEST THE DATA FETCH (DRY RUN) ──────────────────────────────────
+#
+#    python generation/weather_ingest.py --dry-run
+#
+#    This calls the API and prints the first 5 rows WITHOUT writing to the DB.
+#    You should see temperature data for Nairobi, Mombasa, etc.
+#
+#    Expected output:
+#      2026-06-13 20:31:06  INFO  ===== Weather Ingest START [mode=live] =====
+#      2026-06-13 20:31:07  INFO  [Nairobi]  24 rows parsed
+#      2026-06-13 20:31:07  INFO  [Nairobi]  validation OK
+#      ... (5 cities)
+#      2026-06-13 20:31:07  INFO  Total: 120 rows | cities: 5
+#      DRY RUN — not writing. Sample:
+#      city     recorded_at  temp_celsius ...
+#
+#
+#  ── STEP 7: LOAD HISTORICAL DATA ───────────────────────────────────────────
+#
+#    python generation/weather_ingest.py --mode backfill
+#
+#    This loads the last 31 days of hourly data.
+#    Expected: 5 cities × 31 days × 24 hours = 3,720 rows
+#    Takes about 5–10 seconds.
+#
+#
+#  ── STEP 8: VERIFY DATA IN POSTGRESQL ──────────────────────────────────────
+#
+#    docker compose exec postgres psql -U weather_admin -d weather_db
+#
+#    Then type these queries:
+#
+#    -- How many rows do we have?
+#    SELECT COUNT(*) FROM silver.weather_readings;
+#
+#    -- What's the latest reading per city?
+#    SELECT DISTINCT ON (city) city, recorded_at, temp_celsius
+#    FROM silver.weather_readings ORDER BY city, recorded_at DESC;
+#
+#    -- Any duplicate rows? (should return 0)
+#    SELECT city, recorded_at, COUNT(*) FROM silver.weather_readings
+#    GROUP BY city, recorded_at HAVING COUNT(*) > 1;
+#
+#    Type \q to exit.
+#
+#
+#  ── STEP 9: RUN THE TRANSFORMS ─────────────────────────────────────────────
+#
+#    python -m transformation.transform_runner --transform all
+#
+#    This computes daily summaries, monthly summaries, and anomaly detection.
+#    After this, the Gold layer will have data.
+#
+#    Verify:
+#      docker compose exec postgres psql -U weather_admin -d weather_db -c \
+#      "SELECT city, summary_date, avg_temp, total_rain FROM gold.daily_summary LIMIT 10;"
+#
+#
+#  ── STEP 10: OPEN THE DASHBOARD ────────────────────────────────────────────
+#
+#    python serving/dashboard.py
+#
+#    Open: http://localhost:8050
+#
+#    You will see 5 tabs:
+#      📊 Overview    → City cards with yesterday's conditions
+#      🌡️ Temperature → 30-day temperature trend and range chart
+#      🌧️ Rainfall    → Daily rainfall bars + 7-day rolling average
+#      ⚠️ Anomalies   → Flagged unusual temperature readings
+#      📅 Monthly     → Monthly aggregates per city
+#
+#
+#  ── STEP 11: START THE API ─────────────────────────────────────────────────
+#
+#    # In a second terminal:
+#    python serving/api.py
+#
+#    Test it:
+#      curl http://localhost:5000/health
+#      curl http://localhost:5000/api/cities
+#      curl http://localhost:5000/api/weather/current/Nairobi
+#      curl "http://localhost:5000/api/weather/daily/Nairobi?from_date=2026-06-01"
+#      curl "http://localhost:5000/api/export/csv?city=Nairobi" -o nairobi.csv
+#
+#
+#  ── STEP 12: ENABLE AUTOMATIC HOURLY COLLECTION ────────────────────────────
+#
+#    In the Airflow UI (http://localhost:8080):
+#      1. Click on "hourly_weather_ingest"
+#      2. Toggle the switch to ON (blue)
+#      3. Airflow will now run the ingest automatically every hour
+#
+#    You can also trigger a manual run:
+#      Click the ▶ "Trigger DAG" button in the top right
+#
+#    To enable daily transforms:
+#      1. Click "daily_weather_transforms"
+#      2. Toggle ON — it will run at 01:00 EAT every night
+#
+#
+#  ── STEP 13: ENABLE WEEKLY EMAIL REPORTS (optional) ────────────────────────
+#
+#    Fill in the SMTP settings in .env:
+#      SMTP_USER=your_gmail@gmail.com
+#      SMTP_PASSWORD=your_gmail_app_password  (not your real password)
+#
+#    To get a Gmail app password:
+#      Google Account → Security → 2-Step Verification → App passwords
+#      Select "Mail" and "Other" → Copy the 16-character password
+#
+#    Then enable weekly_weather_digest in Airflow UI.
+#    Or test right now:
+#      python serving/reports.py   (prints the HTML to terminal)
+#
+#
+################################################################################
+# PART 11 — COMMON ERRORS & FIXES
+################################################################################
+#
+#  ERROR: "DATABASE_URL is not set"
+#  FIX:   Make sure .env exists and has DATABASE_URL set.
+#         Check: cat .env | grep DATABASE_URL
+#
+#  ERROR: "could not connect to server: Connection refused"
+#  FIX:   PostgreSQL is not running. Check: docker compose ps
+#         Start it: docker compose up -d postgres
+#
+#  ERROR: "relation silver.weather_readings does not exist"
+#  FIX:   The init_db.sql didn't run. Run manually:
+#         docker compose exec postgres psql -U weather_admin -d weather_db \
+#           -f /docker-entrypoint-initdb.d/init_db.sql
+#
+#  ERROR: Airflow DAG not showing up
+#  FIX:   Make sure the dags/ folder is mounted in docker-compose.yml.
+#         Restart scheduler: docker compose restart airflow-scheduler
+#
+#  ERROR: "No module named 'openmeteo_requests'"
+#  FIX:   Install requirements: pip install -r requirements.txt
+#         Make sure your virtual environment is activated.
+#
+#  ERROR: "ImportError: cannot import name 'main' from 'generation.weather_ingest'"
+#  FIX:   Add the project root to PYTHONPATH:
+#         export PYTHONPATH="$PWD"   (Linux/Mac)
+#         set PYTHONPATH=%CD%        (Windows)
+#
+#  ERROR: Dashboard shows "No data yet"
+#  FIX:   Run the ingestion and transforms first:
+#         python generation/weather_ingest.py --mode backfill
+#         python -m transformation.transform_runner --transform all
+#
+#  ERROR: Airflow Fernet key error
+#  FIX:   Generate a fresh key:
+#         python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#         Update AIRFLOW_FERNET_KEY in .env, then: docker compose restart
+#
+#
+################################################################################
+# PART 12 — HOW TO EXTEND THE PROJECT
+################################################################################
+#
+#  ADD A NEW CITY
+#  --------------
+#  In generation/weather_ingest.py, add to the CITIES list:
+#    {"name": "Kisii", "lat": -0.6817, "lon": 34.7667},
+#  That's it. The rest of the pipeline handles it automatically.
+#
+#
+#  ADD A NEW WEATHER VARIABLE
+#  --------------------------
+#  1. In generation/weather_ingest.py, add to HOURLY_VARS:
+#       "uv_index",
+#     VAR_MAP updates automatically.
+#
+#  2. In scripts/init_db.sql, add the column:
+#       ALTER TABLE silver.weather_readings ADD COLUMN IF NOT EXISTS uv_index NUMERIC(4,1);
+#
+#  3. In the parse_response() function, add:
+#       "uv_index": get("uv_index"),
+#
+#  4. Add it to gold.daily_summary and daily_summary.sql if you want it averaged.
+#
+#
+#  ADD A NEW DASHBOARD PANEL
+#  -------------------------
+#  In serving/dashboard.py, add a new tab to app.layout:
+#    dcc.Tab(label="☀️ UV Index", children=[
+#        dcc.Graph(id="uv-chart"),
+#    ]),
+#  Then add a callback function:
+#    @app.callback(Output("uv-chart","figure"), Input("refresh","n_intervals"))
+#    def update_uv(_):
+#        df = query("SELECT city, summary_date, avg_uv FROM gold.daily_summary ...")
+#        return px.line(df, x="summary_date", y="avg_uv", color="city")
+#
+#
+#  ADD A NEW API ENDPOINT
+#  ----------------------
+#  In serving/api.py, add a new route:
+#    @app.get("/api/weather/uv/<city>")
+#    def uv_index(city: str):
+#        rows = db_query("SELECT city, summary_date, avg_uv FROM gold.daily_summary ...")
+#        return jsonify(rows)
+#
+#
+#  CHANGE THE SCHEDULE
+#  -------------------
+#  In dags/hourly_ingest.py, change the schedule parameter:
+#    schedule="0 * * * *"      → every hour at :00
+#    schedule="*/30 * * * *"   → every 30 minutes
+#    schedule="0 6,18 * * *"   → twice a day at 06:00 and 18:00
+#    schedule="0 8 * * 1-5"    → weekdays at 08:00
+#
+#
+#  RUN WITHOUT DOCKER (pure Python)
+#  ----------------------------------
+#  If you have PostgreSQL installed locally:
+#  1. Create the database: createdb weather_db
+#  2. Run the init script: psql weather_db < scripts/init_db.sql
+#  3. Set DATABASE_URL in .env to point to your local instance
+#  4. Skip docker compose entirely
+#  5. For Airflow, install it and run: airflow standalone
+#
+#
+################################################################################
+# PART 13 — LEARNING PATH
+################################################################################
+#
+#  SKILLS THIS PROJECT TEACHES (in order of complexity)
+#  ─────────────────────────────────────────────────────
+#
+#  Beginner skills you use in Stage 1–2:
+#    • Python functions, modules, argparse, logging
+#    • HTTP requests and JSON parsing (requests library)
+#    • pandas DataFrames (read, filter, groupby, to_sql)
+#    • PostgreSQL basics: CREATE TABLE, INSERT, SELECT, indexes
+#    • Environment variables and .env files
+#    • Docker basics: what a container is, docker compose up
+#
+#  Intermediate skills you use in Stage 3–4:
+#    • Apache Airflow: DAGs, tasks, schedules, retries
+#    • SQL aggregation: AVG, MIN, MAX, SUM, GROUP BY
+#    • SQL window functions: AVG() OVER, STDDEV() OVER
+#    • ON CONFLICT DO UPDATE (upsert pattern)
+#    • TIMESTAMPTZ and timezone handling in SQL
+#    • SQLAlchemy engine and connection management
+#
+#  Advanced skills you use in Stage 5:
+#    • Plotly Dash: layouts, callbacks, interactive charts
+#    • Flask REST API: routes, JSON responses, query params
+#    • Medallion architecture design decisions
+#    • Pipeline observability (logging, XCom, validation)
+#    • Statistical anomaly detection (standard deviation)
+#
+#  WHAT TO LEARN NEXT
+#  ──────────────────
+#    dbt            → Version-controlled SQL transforms with built-in tests
+#    Great Expectations → Data quality framework
+#    Apache Kafka   → Real-time data streaming
+#    FastAPI        → More powerful API framework with auto-documentation
+#    Kubernetes     → Deploy this at scale in the cloud
+#    Terraform      → Infrastructure as code for cloud databases
+#
+#  RESOURCES
+#  ─────────
+#    Open-Meteo API docs:   https://open-meteo.com/en/docs
+#    Plotly Dash tutorials: https://dash.plotly.com/tutorial
+#    Airflow docs:          https://airflow.apache.org/docs/
+#    PostgreSQL tutorial:   https://www.postgresqltutorial.com/
+#    dbt for beginners:     https://docs.getdbt.com/docs/introduction
+#
+#
+################################################################################
+#  END OF CODEBASE
+#  Weather Data Warehouse — Built in Nairobi 🇰🇪
+#  Python · PostgreSQL · Airflow · Plotly Dash · Medallion Architecture
+################################################################################
