@@ -25,7 +25,7 @@ def get_engine():
         log.info("DB engine created: %s", url.split("@")[-1])
     return db_engine
 
-def check_engine() -> bool:
+def check_connection() -> bool:
     """Returns True if the database is reachable, False otherwise."""
     try:
         with get_engine().connect() as conn:
