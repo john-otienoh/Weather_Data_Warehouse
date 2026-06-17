@@ -1,4 +1,4 @@
-# 🌦️ Weather Data Warehouse
+# Weather Data Warehouse
 
 <div align="center">
 
@@ -27,7 +27,7 @@ an interactive Plotly Dash dashboard and a Flask REST API.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Overview](#-overview)
 - [Pipeline Overview](#-pipeline-overview)
@@ -48,7 +48,7 @@ an interactive Plotly Dash dashboard and a Flask REST API.
 
 ---
 
-## 🌍 Overview
+## Overview
 
 The **Weather Data Warehouse** is a full-lifecycle data engineering project that demonstrates every stage of a production pipeline applied to a single real-world domain: East African weather.
 
@@ -70,7 +70,7 @@ The entire stack is **pure Python** and **open-source**. No paid services, no pr
 
 ---
 
-## 🔁 Pipeline Overview
+## Pipeline Overview
 
 ```
 ┌──────────────┬───────────────┬───────────────┬───────────────┬─────────────────┐
@@ -103,10 +103,16 @@ gold.monthly_summary         ── Plotly Dash Dashboard ◄───┤
 gold.temperature_anomalies   ── Flask REST API        ◄───┤
 gold.rainfall_trends (view)  ── Weekly Email          ◄───┘
 ```
-
+```
+graph LR
+    A[Open-Meteo API] -->|Raw JSON| B[(Bronze: weather_raw)]
+    B -->|Parsed, typed| C[(Silver: weather_readings)]
+    C -->|Aggregated| D[(Gold: daily_summary, monthly_summary, anomalies)]
+    D -->|Read by| E[Dashboard & API]
+```
 ---
 
-## 🏅 Medallion Architecture
+## Medallion Architecture
 
 This project implements the industry-standard **Medallion (Bronze → Silver → Gold)** pattern.
 
@@ -125,9 +131,9 @@ bronze.weather_raw  ──►  silver.weather_readings  ──►  gold.daily_su
 
 | Layer | Schema | Purpose | Who writes | Who reads |
 |---|---|---|---|---|
-| 🥉 Bronze | `bronze.*` | Immutable raw JSON — audit trail and replay source | Stage 1 | Nobody directly |
-| 🥈 Silver | `silver.*` | Clean, typed, one column per variable | Stage 1 | Stage 4 transforms |
-| 🥇 Gold | `gold.*` | Pre-computed answers — fast queries | Stage 4 | Dashboard + API |
+| Bronze | `bronze.*` | Immutable raw JSON — audit trail and replay source | Stage 1 | Nobody directly |
+| Silver | `silver.*` | Clean, typed, one column per variable | Stage 1 | Stage 4 transforms |
+| Gold | `gold.*` | Pre-computed answers — fast queries | Stage 4 | Dashboard + API |
 
 > **Why three layers?**
 > If parsing logic changes, replay from Bronze without re-hitting the API.
@@ -135,7 +141,7 @@ bronze.weather_raw  ──►  silver.weather_readings  ──►  gold.daily_su
 
 ---
 
-## 📡 Data Collected
+## Data Collected
 
 ### Cities monitored
 
@@ -166,7 +172,7 @@ bronze.weather_raw  ──►  silver.weather_readings  ──►  gold.daily_su
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Layer | Tool | Version | Why this? |
 |---|---|---|---|
@@ -184,49 +190,49 @@ bronze.weather_raw  ──►  silver.weather_readings  ──►  gold.daily_su
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 weather-data-warehouse/
-│
-├── .env.example                    Template for environment variables
-├── requirements.txt                All Python dependencies
-├── docker-compose.yml              Starts PostgreSQL + Airflow
-│
-├── scripts/
-│   ├── init_db.sql                 Creates Bronze/Silver/Gold schemas (auto-runs on first start)
-│   └── setup_airflow.sh            Configures Airflow connections (run once)
-│
-├── src/
-│   └── db/
-│       └── connection.py           Centralised SQLAlchemy engine — imported everywhere
-│
-├── generation/                     STAGE 1 — Generation
-│   └── weather_ingest.py           Fetches Open-Meteo API → writes to Bronze + Silver
-│
-├── transformation/                 STAGE 4 — Transformation
-│   ├── transform_runner.py         Python wrapper — called by Airflow tasks + CLI
-│   ├── daily_summary.sql           Silver → Gold: daily aggregates
-│   ├── monthly_summary.sql         Gold daily → Gold monthly rollup
-│   └── anomaly_detection.sql       Flags readings > 2σ from 30-day baseline
-│
-├── dags/                           STAGE 3 — Ingestion (Airflow)
-│   ├── hourly_ingest.py            Runs every hour automatically
-│   ├── backfill.py                 Loads 31 days of history (manual trigger)
-│   ├── daily_transforms.py         Runs transforms at 01:00 EAT daily
-│   └── weekly_digest.py            Sends HTML email report every Monday
-│
-├── serving/                        STAGE 5 — Serving
-│   ├── dashboard.py                Plotly Dash app — 5 tabs (port 8050)
-│   ├── api.py                      Flask REST API — 8 endpoints (port 5000)
-│   └── reports.py                  Weekly HTML email generator
-│
-└── logs/                           Airflow task logs (auto-created)
+  │
+  ├── .env                        ← Your secret config (passwords, DB URL)
+  ├── .env.example                ← Template showing what goes in .env
+  ├── requirements.txt            ← Python packages to install
+  ├── docker-compose.yml          ← Starts PostgreSQL + Airflow
+  │
+  ├── scripts/
+  │   ├── init_db.sql             ← Creates all schemas and tables (run once)
+  │   └── setup_airflow.sh        ← Configures Airflow connections (run once)
+  │
+  ├── db/
+  │   └── connection.py       ← Single place to get a DB connection
+  │
+  ├── generation/                 ── STAGE 1
+  │   └── weather_ingest.py       ← Fetches data from Open-Meteo → PostgreSQL
+  │
+  ├── transformation/             ── STAGE 4
+  │   ├── transform_runner.py     ← Runs all SQL transforms from Python
+  │   ├── daily_summary.sql       ← Silver → Gold: daily aggregation
+  │   ├── monthly_summary.sql     ← Silver → Gold: monthly rollup
+  │   └── anomaly_detection.sql   ← Gold: temperature anomaly flags
+  │
+  ├── dags/                       ── STAGE 3 (Airflow)
+  │   ├── hourly_ingest.py        ← Runs weather_ingest.py every hour
+  │   ├── backfill.py             ← Loads 31 days of history (manual)
+  │   ├── daily_transforms.py     ← Runs transforms at 01:00 EAT daily
+  │   └── weekly_digest.py        ← Sends summary email every Monday
+  │
+  ├── serving/                    ── STAGE 5
+  │   ├── dashboard.py            ← Plotly Dash web dashboard (port 8050)
+  │   ├── api.py                  ← Flask REST API (port 5000)
+  │   └── reports.py              ← Generates CSV / HTML weekly reports
+  │
+  └── logs/                       ← Airflow writes logs here
 ```
 
 ---
 
-## 📦 Prerequisites
+## Prerequisites
 
 | Tool | Download |
 |---|---|
@@ -330,19 +336,19 @@ python -m transformation.transform_runner --transform all
 python serving/dashboard.py
 ```
 
-**→ Open http://localhost:8050** 🎉
+**→ Open http://localhost:8050**
 
 ---
 
-## 🚀 Usage
+## Usage
 
 ### Service map
 
 | Service | URL | Credentials |
 |---|---|---|
-| 📊 Dashboard | http://localhost:8050 | None |
-| 🔌 REST API | http://localhost:5000 | None |
-| ✈️ Airflow UI | http://localhost:8080 | admin / your `AIRFLOW_ADMIN_PASSWORD` |
+| Dashboard | http://localhost:8050 | None |
+| REST API | http://localhost:5000 | None |
+| Airflow UI | http://localhost:8080 | admin / your `AIRFLOW_ADMIN_PASSWORD` |
 
 ### Enable automatic hourly collection
 
@@ -372,7 +378,7 @@ python -m transformation.transform_runner --transform all
 
 ---
 
-## 📊 Dashboard
+## Dashboard
 
 Five interactive tabs, built with **Plotly Dash** — pure Python, no JavaScript, no external services.
 
@@ -382,17 +388,17 @@ python serving/dashboard.py   →   http://localhost:8050
 
 | Tab | Charts | Data Source |
 |---|---|---|
-| 📊 **Overview** | City stat cards: temp, rain, wind, condition | `gold.daily_summary` |
-| 🌡️ **Temperature** | 30-day trend line + min/max shaded range band | `gold.daily_summary` |
-| 🌧️ **Rainfall** | Daily grouped bar chart + 7-day rolling average line | `gold.rainfall_trends` |
-| ⚠️ **Anomalies** | Scatter plot vs baseline + sortable anomaly table | `gold.temperature_anomalies` |
-| 📅 **Monthly** | Monthly avg temp + total rainfall grouped bar charts | `gold.monthly_summary` |
+| **Overview** | City stat cards: temp, rain, wind, condition | `gold.daily_summary` |
+| **Temperature** | 30-day trend line + min/max shaded range band | `gold.daily_summary` |
+| **Rainfall** | Daily grouped bar chart + 7-day rolling average line | `gold.rainfall_trends` |
+| **Anomalies** | Scatter plot vs baseline + sortable anomaly table | `gold.temperature_anomalies` |
+| **Monthly** | Monthly avg temp + total rainfall grouped bar charts | `gold.monthly_summary` |
 
 **Features:** auto-refresh every hour · city filter on temperature tab · consistent city colour palette · anomaly rows highlighted red/blue · all queries hit pre-computed Gold layer
 
 ---
 
-## 🔌 API Reference
+## API Reference
 
 ```
 python serving/api.py   →   http://localhost:5000
@@ -434,7 +440,7 @@ curl http://localhost:5000/api/weather/current/Nairobi
 
 ---
 
-## ✈️ Airflow DAGs
+## Airflow DAGs
 
 Access at **http://localhost:8080** (admin / your password)
 
@@ -447,7 +453,7 @@ Access at **http://localhost:8080** (admin / your password)
 
 ---
 
-## 🎓 Skills Learned
+## Skills Learned
 
 <details>
 <summary><strong>Data Engineering Fundamentals</strong></summary>
@@ -507,7 +513,7 @@ Access at **http://localhost:8080** (admin / your password)
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 ### Data quality
 - [ ] Great Expectations for dataset-level validation suites with DAG-level quality gates
@@ -535,7 +541,7 @@ Access at **http://localhost:8080** (admin / your password)
 
 ---
 
-## 🚨 Common Errors & Fixes
+## Common Errors & Fixes
 
 | Error | Cause | Fix |
 |---|---|---|
@@ -550,7 +556,7 @@ Access at **http://localhost:8080** (admin / your password)
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 1. **Fork** the repository
 2. **Create a branch**: `git checkout -b feature/add-kisii`
@@ -560,7 +566,7 @@ Access at **http://localhost:8080** (admin / your password)
 
 ---
 
-## 📄 License
+## License
 
 ```
 MIT License — Copyright (c) 2026

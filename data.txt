@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""
+  Weather Data Warehouse Pipeline - Generation Stage
+
+  Fetches hourly weather data for 5 Kenyan cities from Open-Meteo,
+  validates each city's records, and writes to PostgreSQL.
+  Falls back to a timestamped CSV file if no DATABASE_URL is set.
+
+
+  USAGE
+  -----
+  Standard hourly run (today's data):
+      python weather_ingest.py
+
+  Historical backfill (last 31 days):
+      python weather_ingest.py --mode backfill
+
+  Dry run (fetch + validate only, no writes):
+      python weather_ingest.py --dry-run
+
+  Via environment variable (for Airflow):
+      INGEST_MODE=backfill python weather_ingest.py
+"""
+
+import os
+import sys
+import logging
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+
+import openmeteo_requests
+import pandas as pd
+import requests_cache
+from retry_requests import retry
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+load_dotenv()
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Prints messages with a timestamp so you can see exactly what happened when.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+# ── City configuration ────────────────────────────────────────────────────────
+# Add or remove cities here. Latitude/longitude from Google Maps.
+CITIES = [
+    {"name": "Nairobi",  "lat": -1.2833, "lon": 36.8167},
+    {"name": "Mombasa",  "lat": -4.0547, "lon": 39.6636},
+    {"name": "Kisumu",   "lat": -0.0861, "lon": 34.7289},
+    {"name": "Nakuru",   "lat": -0.3072, "lon": 36.0722},
+    {"name": "Eldoret",  "lat":  0.5204, "lon": 35.2699},
+]
+
+# ── Weather variables to collect ──────────────────────────────────────────────
+# Full list at https://open-meteo.com/en/docs#hourly-variables
+HOURLY_VARS = [
+    "temperature_2m",        # air temperature at 2 metres height (°C)
+    "relative_humidity_2m",  # relative humidity (%)
+    "apparent_temperature",  # feels-like temperature (°C)
+    "precipitation",         # total precipitation mm
+    "rain",                  # rain-only mm
+    "weather_code",          # WMO weather code (0=clear, 61=rain, 95=thunder...)
+    "surface_pressure",      # surface pressure hPa
+    "cloud_cover",           # cloud cover %
+    "wind_speed_10m",        # wind speed at 10 m (m/s)
+    "wind_direction_10m",    # wind direction degrees
+    "wind_gusts_10m",        # wind gusts (m/s)
+    "visibility",            # visibility in metres
+]
+
+# Safe name→index map: if you reorder HOURLY_VARS the extraction won't break
+VAR_MAP = {name: i for i, name in enumerate(HOURLY_VARS)}
+
+API_URL = "https://api.open-meteo.com/v1/forecast"
+
+# ── Explicit column order for the staging → silver upsert ────────────────────
+# Used by write_to_db() so the INSERT/SELECT never relies on column position.
+# This list intentionally excludes "id" — that column is BIGSERIAL and is
+# generated automatically by PostgreSQL on insert.
+SILVER_COLUMNS = [
+    "city", "recorded_at", "fetched_at",
+    "temp_celsius", "apparent_temp", "humidity_pct",
+    "precipitation_mm", "rain_mm", "weather_code",
+    "pressure_hpa", "cloud_cover_pct",
+    "wind_speed_mps", "wind_direction_deg", "wind_gusts_mps",
+    "visibility_m",
+]
+
+
+# ── Step 1: Build the API client ──────────────────────────────────────────────
+def build_client() -> openmeteo_requests.Client:
+    """
+    Creates an API client with:
+      - Caching: saves results locally for 30 min (avoids hitting API twice)
+      - Retry:   automatically retries on network failures (up to 5 times)
+    """
+    cache_dir = Path(__file__).parent / ".openmeteo_cache"
+    cache_dir.mkdir(exist_ok=True)
+
+    session = requests_cache.CachedSession(
+        str(cache_dir / "cache"), expire_after=1800
+    )
+    retry_session = retry(session, retries=5, backoff_factor=0.2)
+    log.info("API client ready (cache: %s)", cache_dir)
+    return openmeteo_requests.Client(session=retry_session)
+
+
+# ── Step 2: Build API parameters ─────────────────────────────────────────────
+def build_params(mode: str = "live") -> dict:
+    """
+    mode='live'     → fetch today's 24 hourly readings (one full day)
+    mode='backfill' → fetch the last 31 days (used to seed the database)
+    """
+    params = {
+        "latitude":  [c["lat"] for c in CITIES],
+        "longitude": [c["lon"] for c in CITIES],
+        "hourly":    HOURLY_VARS,
+        "timezone":  "auto",  # Open-Meteo detects Africa/Nairobi from coordinates
+    }
+    if mode == "backfill":
+        params["past_days"] = 31
+        log.info("Mode: BACKFILL — fetching 31 days of history")
+    else:
+        params["forecast_days"] = 1
+        log.info("Mode: LIVE — fetching today (24 rows per city)")
+    return params
+
+
+# ── Step 3: Call the API ──────────────────────────────────────────────────────
+def fetch_weather(client, params: dict) -> list:
+    """Calls Open-Meteo and returns one response object per city."""
+    log.info("Calling Open-Meteo for %d cities ...", len(CITIES))
+    responses = client.weather_api(API_URL, params=params)
+    log.info("Received %d responses", len(responses))
+    return responses
+
+
+# ── Step 4: Parse one city response into a DataFrame ─────────────────────────
+def parse_response(response, city: dict, fetched_at: datetime) -> pd.DataFrame:
+    """
+    Converts the API response for one city into a clean pandas DataFrame.
+    Each row = one hour of data for that city.
+    """
+    hourly = response.Hourly()
+
+    # Use VAR_MAP so the extraction never silently breaks if order changes
+    def get(var_name: str):
+        return hourly.Variables(VAR_MAP[var_name]).ValuesAsNumpy()
+
+    # Build the timestamps for each hourly reading
+    times = pd.date_range(
+        start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+        end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+        freq=pd.Timedelta(seconds=hourly.Interval()),
+        inclusive="left",
+    )
+
+    # Column order here matches SILVER_COLUMNS exactly (minus "id").
+    # Keeping these in sync is good practice, even though write_to_db()
+    # no longer depends on it for correctness.
+    df = pd.DataFrame({
+        "city":               city["name"],
+        "recorded_at":        times,
+        "fetched_at":         fetched_at,          # when we pulled this data
+        "temp_celsius":       get("temperature_2m"),
+        "apparent_temp":      get("apparent_temperature"),
+        "humidity_pct":       get("relative_humidity_2m"),
+        "precipitation_mm":   get("precipitation"),
+        "rain_mm":            get("rain"),
+        "weather_code":       get("weather_code"),
+        "pressure_hpa":       get("surface_pressure"),
+        "cloud_cover_pct":    get("cloud_cover"),
+        "wind_speed_mps":     get("wind_speed_10m"),
+        "wind_direction_deg": get("wind_direction_10m"),
+        "wind_gusts_mps":     get("wind_gusts_10m"),
+        "visibility_m":       get("visibility"),
+    })
+
+    log.info("  [%s] %d rows parsed", city["name"], len(df))
+    return df
+
+
+# ── Step 5: Validate the data ─────────────────────────────────────────────────
+def validate(df: pd.DataFrame, city_name: str) -> bool:
+    """
+    Quick sanity checks before writing to the database.
+    Returns False if something looks wrong (empty or all nulls).
+    """
+    if df.empty:
+        log.error("  [%s] EMPTY — skipping", city_name)
+        return False
+
+    nulls = df["temp_celsius"].isna().sum()
+    if nulls > 20:
+        log.warning("  [%s] %d null temperatures", city_name, nulls)
+
+    out_of_range = (~df["temp_celsius"].dropna().between(-5, 45)).sum()
+    if out_of_range:
+        log.warning("  [%s] %d suspicious temperatures", city_name, out_of_range)
+
+    log.info("  [%s] validation OK", city_name)
+    return True
+
+
+# ── Step 6: Write to Bronze then Silver ──────────────────────────────────────
+def write_to_db(df: pd.DataFrame, engine) -> None:
+    """
+    SILVER: insert parsed data to a staging table, then upsert into the
+    real silver.weather_readings table.
+
+    FIX: silver.weather_readings has an "id BIGSERIAL PRIMARY KEY" column
+    that the staging table does NOT have (df.to_sql() only creates columns
+    present in the DataFrame). A bare "INSERT ... SELECT *" maps columns by
+    POSITION — so "city" (text, position 1 in staging) would land in the
+    "id" slot (bigint, position 1 in the real table) and crash with
+    DatatypeMismatch. Naming every column explicitly avoids this entirely,
+    and keeps working even if either table's column order ever changes.
+
+    ON CONFLICT (city, recorded_at) DO NOTHING = safe to re-run without
+    creating duplicates.
+    """
+    # Write to staging (creates/replaces the table each time)
+    df.to_sql(
+        "weather_readings_staging",
+        schema="silver",
+        con=engine,
+        if_exists="replace",
+        index=False,
+        method="multi",
+    )
+
+    columns_sql = ", ".join(SILVER_COLUMNS)
+
+    # Upsert from staging into the real silver table — explicit columns only
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO silver.weather_readings ({columns_sql})
+            SELECT {columns_sql}
+            FROM silver.weather_readings_staging
+            ON CONFLICT (city, recorded_at) DO NOTHING;
+
+            DROP TABLE IF EXISTS silver.weather_readings_staging;
+        """))
+
+    log.info("  Wrote %d rows to silver.weather_readings", len(df))
+
+
+def write_to_csv(df: pd.DataFrame) -> None:
+    """Fallback: save to CSV if no DATABASE_URL is set."""
+    # FIX: datetime.utcnow() is deprecated since Python 3.12.
+    # Use timezone-aware datetime.now(timezone.utc) instead.
+    path = f"data/raw/weather_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    log.info("Saved to %s", path)
+
+
+# ── Main: wires everything together ──────────────────────────────────────────
+def main(mode: str = "live", dry_run: bool = False) -> None:
+    log.info("===== Weather Ingest START [mode=%s | dry_run=%s] =====", mode, dry_run)
+
+    fetched_at = datetime.now(timezone.utc)
+    client     = build_client()
+    params     = build_params(mode)
+
+    try:
+        responses = fetch_weather(client, params)
+    except Exception as e:
+        log.error("API call failed: %s", e)
+        sys.exit(1)
+
+    all_dfs, failed = [], []
+
+    for i, response in enumerate(responses):
+        city = CITIES[i]
+        try:
+            df = parse_response(response, city, fetched_at)
+            if validate(df, city["name"]):
+                all_dfs.append(df)
+        except Exception as e:
+            log.error("  [%s] parse failed: %s", city["name"], e)
+            failed.append(city["name"])
+
+    if failed:
+        log.warning("Skipped cities: %s", failed)
+
+    if not all_dfs:
+        log.error("No data collected. Exiting.")
+        sys.exit(1)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+    log.info("Total: %d rows | cities: %d", len(combined), len(all_dfs))
+
+    if dry_run:
+        log.info("DRY RUN — not writing. Sample:")
+        print(combined.head(5).to_string(index=False))
+        return
+
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        try:
+            engine = create_engine(db_url, pool_pre_ping=True)
+            write_to_db(combined, engine)
+        except Exception as e:
+            log.error("DB write failed: %s — saving to CSV", e)
+            write_to_csv(combined)
+    else:
+        log.warning("DATABASE_URL not set — writing to CSV")
+        write_to_csv(combined)
+
+    log.info("===== Weather Ingest DONE =====")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Weather ingest — Stage 1")
+    parser.add_argument("--mode",    choices=["live", "backfill"], default="live")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    main(mode=args.mode, dry_run=args.dry_run)
+
+-- Create the Airflow metadata database (Airflow stores its own data here)
+CREATE DATABASE airflow_db;
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BRONZE LAYER — raw data exactly as received from the API
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS bronze;
+
+CREATE TABLE IF NOT EXISTS bronze.weather_raw (
+    id         BIGSERIAL    PRIMARY KEY,
+    city       VARCHAR(100) NOT NULL,
+    fetched_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    payload    JSONB        NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bronze_city_fetched
+    ON bronze.weather_raw (city, fetched_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SILVER LAYER — clean, parsed, typed hourly readings
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS silver;
+
+CREATE TABLE IF NOT EXISTS silver.weather_readings (
+    id                  BIGSERIAL    PRIMARY KEY,
+    city                VARCHAR(100) NOT NULL,
+    recorded_at         TIMESTAMPTZ  NOT NULL,    
+    fetched_at          TIMESTAMPTZ  NOT NULL,    
+    temp_celsius        NUMERIC(5,2),         
+    apparent_temp       NUMERIC(5,2),             
+    humidity_pct        SMALLINT,                 
+    precipitation_mm    NUMERIC(6,3),        
+    rain_mm             NUMERIC(6,3),             
+    weather_code        SMALLINT,                
+    pressure_hpa        NUMERIC(7,2),     
+    cloud_cover_pct     SMALLINT,                 
+    wind_speed_mps      NUMERIC(5,2),           
+    wind_direction_deg  SMALLINT,                 
+    wind_gusts_mps      NUMERIC(5,2),               
+    visibility_m        INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_silver_city_recorded
+    ON silver.weather_readings (city, recorded_at);
+
+CREATE INDEX IF NOT EXISTS idx_silver_recorded_at
+    ON silver.weather_readings (recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_silver_city_time
+    ON silver.weather_readings (city, recorded_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- GOLD LAYER — pre-computed aggregates
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE SCHEMA IF NOT EXISTS gold;
+
+-- Daily summary: one row per city per calendar day
+CREATE TABLE IF NOT EXISTS gold.daily_summary (
+    city             VARCHAR(100) NOT NULL,
+    summary_date     DATE         NOT NULL,
+    avg_temp         NUMERIC(5,2),   
+    min_temp         NUMERIC(5,2),
+    max_temp         NUMERIC(5,2),
+    avg_humidity     NUMERIC(5,2),    
+    avg_pressure     NUMERIC(7,2),    
+    total_rain       NUMERIC(6,3),    
+    avg_wind_speed   NUMERIC(5,2),   
+    avg_wind_gusts   NUMERIC(5,2),    
+    avg_visibility   NUMERIC(8,1),
+    dominant_code    SMALLINT,       
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (city, summary_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_daily_date
+    ON gold.daily_summary (summary_date DESC);
+
+-- Monthly summary: one row per city per month
+CREATE TABLE IF NOT EXISTS gold.monthly_summary (
+    city           VARCHAR(100) NOT NULL,
+    year           SMALLINT     NOT NULL,
+    month          SMALLINT     NOT NULL CHECK (month BETWEEN 1 AND 12),
+    avg_temp       NUMERIC(5,2),
+    min_temp       NUMERIC(5,2),
+    max_temp       NUMERIC(5,2),
+    total_rain     NUMERIC(7,3),
+    rainy_days     SMALLINT,          
+    avg_wind_speed NUMERIC(5,2),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (city, year, month)
+);
+
+-- Temperature anomalies: flags unusual hourly readings
+CREATE TABLE IF NOT EXISTS gold.temperature_anomalies (
+    id           BIGSERIAL    PRIMARY KEY,
+    city         VARCHAR(100) NOT NULL,
+    recorded_at  TIMESTAMPTZ  NOT NULL,
+    temp_celsius NUMERIC(5,2),
+    baseline_avg NUMERIC(5,2),
+    deviation    NUMERIC(5,2),   
+    is_anomaly   BOOLEAN      NOT NULL DEFAULT FALSE,
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (city, recorded_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_anomalies_city
+    ON gold.temperature_anomalies (city, detected_at DESC)
+    WHERE is_anomaly = TRUE;
+
+-- Rainfall trends: rolling averages (a view — no storage needed)
+CREATE OR REPLACE VIEW gold.rainfall_trends AS
+SELECT
+    city,
+    summary_date,
+    total_rain,
+    ROUND(
+        AVG(total_rain) OVER (
+            PARTITION BY city
+            ORDER BY summary_date
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        )::NUMERIC, 3
+    ) AS rolling_7d_rain_mm,
+    ROUND(
+        AVG(total_rain) OVER (
+            PARTITION BY city
+            ORDER BY summary_date
+            ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+        )::NUMERIC, 3
+    ) AS rolling_30d_rain_mm
+FROM gold.daily_summary
+ORDER BY city, summary_date DESC;
+
+COMMENT ON TABLE silver.weather_readings IS 'Clean parsed hourly readings.';
+COMMENT ON TABLE gold.daily_summary      IS 'Daily aggregates.';
+COMMENT ON TABLE gold.monthly_summary    IS 'Monthly aggregates.';
+COMMENT ON TABLE gold.temperature_anomalies IS 'Hourly readings > 2 std deviations from 30-day mean.';
+
+WITH baseline AS (
+    -- Compute average and spread for each city over the last 30 days
+    SELECT
+        city,
+        AVG(temp_celsius)                               AS baseline_avg,
+        -- If we have < 48 readings (< 2 days), use 0.8°C as a safe default
+        CASE WHEN COUNT(*) < 48 THEN 0.8
+             ELSE STDDEV(temp_celsius)
+        END                                             AS effective_std
+    FROM silver.weather_readings
+    WHERE recorded_at >= NOW() - INTERVAL '30 days'
+      AND temp_celsius IS NOT NULL
+    GROUP BY city
+)
+INSERT INTO gold.temperature_anomalies (
+    city, recorded_at, temp_celsius,
+    baseline_avg, deviation, is_anomaly, detected_at
+)
+
+SELECT
+    r.city,
+    r.recorded_at,
+    r.temp_celsius,
+    ROUND(b.baseline_avg::NUMERIC,                    2) AS baseline_avg,
+    ROUND((r.temp_celsius - b.baseline_avg)::NUMERIC, 2) AS deviation,
+    -- is_anomaly = TRUE when the reading is more than 2 standard deviations away
+    ABS(r.temp_celsius - b.baseline_avg) > (2.0 * b.effective_std) AS is_anomaly,
+    NOW()
+
+FROM silver.weather_readings r
+JOIN baseline b ON r.city = b.city
+WHERE r.recorded_at >= NOW() - INTERVAL '25 hours'
+
+ON CONFLICT (city, recorded_at) DO UPDATE SET
+    temp_celsius  = EXCLUDED.temp_celsius,
+    baseline_avg  = EXCLUDED.baseline_avg,
+    deviation     = EXCLUDED.deviation,
+    is_anomaly    = EXCLUDED.is_anomaly,
+    detected_at   = EXCLUDED.detected_at;
+
+INSERT INTO gold.monthly_summary (
+    city, 
+    year, 
+    month,
+    avg_temp, 
+    min_temp, 
+    max_temp,
+    total_rain, 
+    rainy_days,
+    avg_wind_speed, 
+    updated_at
+)
+SELECT
+    city,
+    EXTRACT(YEAR  FROM summary_date)::INT AS year,
+    EXTRACT(MONTH FROM summary_date)::INT AS month,
+    ROUND(AVG(avg_temp)::NUMERIC, 2) AS avg_temp,
+    ROUND(MIN(min_temp)::NUMERIC, 2) AS min_temp,   
+    ROUND(MAX(max_temp)::NUMERIC, 2) AS max_temp,   
+    ROUND(SUM(total_rain)::NUMERIC, 3) AS total_rain,
+    SUM(CASE WHEN total_rain > 0.1 THEN 1 ELSE 0 END)  AS rainy_days,
+    ROUND(AVG(avg_wind_speed)::NUMERIC, 2) AS avg_wind_speed,
+    NOW()
+FROM gold.daily_summary
+WHERE EXTRACT(YEAR FROM summary_date) = COALESCE(:target_year::INT, EXTRACT(YEAR FROM CURRENT_DATE - INTERVAL '1 month'))
+  AND EXTRACT(MONTH FROM summary_date) = COALESCE(:target_month::INT, EXTRACT(MONTH FROM CURRENT_DATE - INTERVAL '1 month'))
+GROUP BY city, year, month
+
+ON CONFLICT (city, year, month) DO UPDATE SET
+    avg_temp = EXCLUDED.avg_temp,
+    min_temp = EXCLUDED.min_temp,
+    max_temp = EXCLUDED.max_temp,
+    total_rain = EXCLUDED.total_rain,
+    rainy_days = EXCLUDED.rainy_days,
+    avg_wind_speed = EXCLUDED.avg_wind_speed,
+    updated_at = NOW();
+
+INSERT INTO gold.daily_summary(
+    city, 
+    summary_date,
+    avg_temp, 
+    min_temp, 
+    max_temp,
+    avg_humidity, 
+    avg_pressure,
+    total_rain,
+    avg_wind_speed, 
+    avg_wind_gusts,
+    avg_visibility, 
+    dominant_code,
+    updated_at
+)
+SELECT 
+    city,
+    DATE(recorded_at AT TIME ZONE 'Africa/Nairobi') AS summary_date,
+    ROUND(AVG(temp_celsius)::NUMERIC, 2) AS avg_temp,
+    ROUND(MIN(temp_celsius)::NUMERIC, 2) AS min_temp,
+    ROUND(MAX(temp_celsius)::NUMERIC, 2) AS max_temp,
+    ROUND(AVG(humidity_pct)::NUMERIC, 2) AS avg_humidity,
+    ROUND(AVG(pressure_hpa)::NUMERIC, 2) AS avg_pressure,
+    ROUND(SUM(rain_mm)::NUMERIC, 3) AS total_rain,
+    ROUND(AVG(wind_speed_mps)::NUMERIC, 2) AS avg_wind_speed,
+    ROUND(AVG(wind_gusts_mps)::NUMERIC, 2) AS avg_wind_gusts,
+    ROUND(AVG(visibility_m)::NUMERIC, 1) AS avg_visibility,
+    MODE() WITHIN GROUP (ORDER BY weather_code) AS dominant_code,
+    NOW()
+
+FROM silver.weather_readings
+WHERE DATE(recorded_at AT TIME ZONE 'Africa/Nairobi')
+      = COALESCE(:target_date::DATE, CURRENT_DATE - 1)
+  AND temp_celsius IS NOT NULL
+GROUP BY city, summary_date
+
+ON CONFLICT (city, summary_date) DO UPDATE SET
+    avg_temp = EXCLUDED.avg_temp,
+    min_temp = EXCLUDED.min_temp,
+    max_temp = EXCLUDED.max_temp,
+    avg_humidity = EXCLUDED.avg_humidity,
+    avg_pressure = EXCLUDED.avg_pressure,
+    total_rain = EXCLUDED.total_rain,
+    avg_wind_speed = EXCLUDED.avg_wind_speed,
+    avg_wind_gusts = EXCLUDED.avg_wind_gusts,
+    avg_visibility = EXCLUDED.avg_visibility,
+    dominant_code  = EXCLUDED.dominant_code,
+    updated_at = NOW();
+
+import logging
+import argparse
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Optional
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))  # project root
+
+from sqlalchemy import text
+from db.connection import get_engine
+
+# Logging
+log = logging.getLogger(__name__)
+
+# Path to the SQL files
+SQL_DIR = Path(__file__).parent
+
+def run_sql(sql: str, params: dict, label: str) -> int:
+    """
+    Executes a SQL string inside a transaction.
+    Returns the number of rows affected.
+    If anything fails, the transaction is rolled back automatically.
+    """
+    with get_engine().begin() as conn:
+        result = conn.execute(text(sql), params)
+        count = result.rowcount if result.rowcount >= 0 else -1
+        log.info("[%s] rows affected: %s", label, count)
+        return count
+    
+def load(filename: str):
+    """Read a SQL file from the transforms folder."""
+    path = SQL_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"SQL file not found: {path}")
+    return path.read_text()
+
+def run_daily_summary(target_date: Optional[date] = None) -> dict:
+    """
+    Compute daily aggregates for target_date (default: yesterday).
+    Writes 5 rows to gold.daily_summary (one per city).
+    """
+    target_date = target_date or date.today() - timedelta(days=1)
+    log.info("Running daily summary for %s ...", target_date)
+    sql  = load("daily_summary.sql")
+    rows = run_sql(sql, {"target_date": str(target_date)}, "daily_summary")
+    return {"transform": "daily_summary", "date": str(target_date), "rows": rows}
+
+def run_monthly_summary(year: int = None, month: int = None) -> dict:
+    """
+    Compute monthly aggregates (default: previous calendar month).
+    Only writes rows when all daily data for that month is in gold.daily_summary.
+    """
+    if not year or not month:
+        prev = (date.today().replace(day=1) - timedelta(days=1))
+        year, month = prev.year, prev.month
+    log.info("Running monthly summary for %04d-%02d ...", year, month)
+    sql  = load("monthly_summary.sql")
+    rows = run_sql(sql, {"target_year": year, "target_month": month}, "monthly_summary")
+    return {"transform": "monthly_summary", "period": f"{year:04d}-{month:02d}", "rows": rows}
+
+def run_anomaly_detection() -> dict:
+    """
+    Flag hourly readings from the last 25 hours as anomalies if they are
+    more than 2 standard deviations from the 30-day baseline.
+    """
+    log.info("Running anomaly detection ...")
+    sql  = load("anomaly_detection.sql")
+    rows = run_sql(sql, {}, "anomaly_detection")
+
+    with get_engine().connect() as conn:
+        flagged = conn.execute(text("""
+            SELECT COUNT(*) FROM gold.temperature_anomalies
+            WHERE is_anomaly = TRUE AND detected_at >= NOW() - INTERVAL '25 hours'
+        """)).scalar()
+
+    return {"transform": "anomaly_detection", "rows": rows, "anomalies": flagged}
+
+def validate_gold() -> dict:
+    """Check that gold.daily_summary has rows for yesterday."""
+    yesterday = date.today() - timedelta(days=1)
+    with get_engine().connect() as conn:
+        result = conn.execute(text("""
+            SELECT city, avg_temp, total_rain
+            FROM gold.daily_summary
+            WHERE summary_date = :d ORDER BY city
+        """), {"d": str(yesterday)})
+        rows = result.fetchall()
+
+    found = [r[0] for r in rows]
+    missing = [c for c in ["Eldoret","Kisumu","Mombasa","Nairobi","Nakuru"] if c not in found]
+
+    if missing:
+        raise ValueError(f"Gold missing cities for {yesterday}: {missing}")
+
+    log.info("Gold validation OK for %s: %d cities", yesterday, len(rows))
+    return {"date": str(yesterday), "cities": found}

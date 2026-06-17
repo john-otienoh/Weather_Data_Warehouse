@@ -22,8 +22,8 @@ SELECT
     ROUND(AVG(avg_wind_speed)::NUMERIC, 2) AS avg_wind_speed,
     NOW()
 FROM gold.daily_summary
-WHERE EXTRACT(YEAR FROM summary_date) = COALESCE(:target_year::INT, EXTRACT(YEAR FROM CURRENT_DATE - INTERVAL '1 month'))
-  AND EXTRACT(MONTH FROM summary_date) = COALESCE(:target_month::INT, EXTRACT(MONTH FROM CURRENT_DATE - INTERVAL '1 month'))
+WHERE EXTRACT(YEAR  FROM summary_date) = COALESCE(CAST(:target_year AS INT),  EXTRACT(YEAR  FROM CURRENT_DATE - INTERVAL '1 month'))
+  AND EXTRACT(MONTH FROM summary_date) = COALESCE(CAST(:target_month AS INT), EXTRACT(MONTH FROM CURRENT_DATE - INTERVAL '1 month'))
 GROUP BY city, year, month
 
 ON CONFLICT (city, year, month) DO UPDATE SET

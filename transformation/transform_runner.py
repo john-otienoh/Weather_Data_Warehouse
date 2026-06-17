@@ -3,7 +3,9 @@ import argparse
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
-
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))  # project root
 
 from sqlalchemy import text
 from db.connection import get_engine
@@ -40,8 +42,8 @@ def run_daily_summary(target_date: Optional[date] = None) -> dict:
     """
     target_date = target_date or date.today() - timedelta(days=1)
     log.info("Running daily summary for %s ...", target_date)
-    sql  = _load("daily_summary.sql")
-    rows = _run_sql(sql, {"target_date": str(target_date)}, "daily_summary")
+    sql  = load("daily_summary.sql")
+    rows = run_sql(sql, {"target_date": str(target_date)}, "daily_summary")
     return {"transform": "daily_summary", "date": str(target_date), "rows": rows}
 
 def run_monthly_summary(year: int = None, month: int = None) -> dict:
@@ -53,8 +55,8 @@ def run_monthly_summary(year: int = None, month: int = None) -> dict:
         prev = (date.today().replace(day=1) - timedelta(days=1))
         year, month = prev.year, prev.month
     log.info("Running monthly summary for %04d-%02d ...", year, month)
-    sql  = _load("monthly_summary.sql")
-    rows = _run_sql(sql, {"target_year": year, "target_month": month}, "monthly_summary")
+    sql  = load("monthly_summary.sql")
+    rows = run_sql(sql, {"target_year": year, "target_month": month}, "monthly_summary")
     return {"transform": "monthly_summary", "period": f"{year:04d}-{month:02d}", "rows": rows}
 
 def run_anomaly_detection() -> dict:
@@ -63,8 +65,8 @@ def run_anomaly_detection() -> dict:
     more than 2 standard deviations from the 30-day baseline.
     """
     log.info("Running anomaly detection ...")
-    sql  = _load("anomaly_detection.sql")
-    rows = _run_sql(sql, {}, "anomaly_detection")
+    sql  = load("anomaly_detection.sql")
+    rows = run_sql(sql, {}, "anomaly_detection")
 
     with get_engine().connect() as conn:
         flagged = conn.execute(text("""
@@ -93,3 +95,19 @@ def validate_gold() -> dict:
 
     log.info("Gold validation OK for %s: %d cities", yesterday, len(rows))
     return {"date": str(yesterday), "cities": found}
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+ 
+    parser = argparse.ArgumentParser(description="Run weather transforms")
+    parser.add_argument("--transform", choices=["daily", "monthly", "anomalies", "all"], default="all")
+    parser.add_argument("--date",  help="YYYY-MM-DD for daily transform")
+    parser.add_argument("--year",  type=int)
+    parser.add_argument("--month", type=int)
+    args = parser.parse_args()
+ 
+    target = date.fromisoformat(args.date) if args.date else None
+ 
+    if args.transform in ("daily",     "all"): print(run_daily_summary(target))
+    if args.transform in ("anomalies", "all"): print(run_anomaly_detection())
+    if args.transform in ("monthly",   "all"): print(run_monthly_summary(args.year, args.month))
+    if args.transform == "all":                print(validate_gold())

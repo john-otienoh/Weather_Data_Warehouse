@@ -30,7 +30,7 @@ SELECT
 
 FROM silver.weather_readings
 WHERE DATE(recorded_at AT TIME ZONE 'Africa/Nairobi')
-      = COALESCE(:target_date::DATE, CURRENT_DATE - 1)
+      = COALESCE(CAST(:target_date AS DATE), CURRENT_DATE - 1)
   AND temp_celsius IS NOT NULL
 GROUP BY city, summary_date
 
@@ -46,4 +46,3 @@ ON CONFLICT (city, summary_date) DO UPDATE SET
     avg_visibility = EXCLUDED.avg_visibility,
     dominant_code  = EXCLUDED.dominant_code,
     updated_at = NOW();
-    

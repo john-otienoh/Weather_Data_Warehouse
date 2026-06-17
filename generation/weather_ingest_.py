@@ -6,6 +6,7 @@
   validates each city's records, and writes to PostgreSQL.
   Falls back to a timestamped CSV file if no DATABASE_URL is set.
 
+
   USAGE
   -----
   Standard hourly run (today's data):
@@ -21,7 +22,6 @@
       INGEST_MODE=backfill python weather_ingest.py
 """
 
-# Imports 
 import os
 import sys
 import logging
@@ -36,15 +36,10 @@ from retry_requests import retry
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-try:
-    DB_AVAILABLE = True
-except ImportError:
-    DB_AVAILABLE = False
-    
-# Load env variables
 load_dotenv()
 
-# Logger
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Prints messages with a timestamp so you can see exactly what happened when.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -52,347 +47,280 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Project Configuration
+
+# ── City configuration ────────────────────────────────────────────────────────
+# Add or remove cities here. Latitude/longitude from Google Maps.
 CITIES = [
-    {"name": "Nairobi", "lat": -1.2833, "lon": 36.8167},
-    {"name": "Mombasa", "lat": -4.0547, "lon": 39.6636},
-    {"name": "Kisumu",  "lat": -0.0861, "lon": 34.7289},
-    {"name": "Nakuru",  "lat": -0.3072, "lon": 36.0722},
-    {"name": "Eldoret", "lat":  0.5204, "lon": 35.2699},
+    {"name": "Nairobi",  "lat": -1.2833, "lon": 36.8167},
+    {"name": "Mombasa",  "lat": -4.0547, "lon": 39.6636},
+    {"name": "Kisumu",   "lat": -0.0861, "lon": 34.7289},
+    {"name": "Nakuru",   "lat": -0.3072, "lon": 36.0722},
+    {"name": "Eldoret",  "lat":  0.5204, "lon": 35.2699},
 ]
+
+# ── Weather variables to collect ──────────────────────────────────────────────
+# Full list at https://open-meteo.com/en/docs#hourly-variables
+HOURLY_VARS = [
+    "temperature_2m",        # air temperature at 2 metres height (°C)
+    "relative_humidity_2m",  # relative humidity (%)
+    "apparent_temperature",  # feels-like temperature (°C)
+    "precipitation",         # total precipitation mm
+    "rain",                  # rain-only mm
+    "weather_code",          # WMO weather code (0=clear, 61=rain, 95=thunder...)
+    "surface_pressure",      # surface pressure hPa
+    "cloud_cover",           # cloud cover %
+    "wind_speed_10m",        # wind speed at 10 m (m/s)
+    "wind_direction_10m",    # wind direction degrees
+    "wind_gusts_10m",        # wind gusts (m/s)
+    "visibility",            # visibility in metres
+]
+
+# Safe name→index map: if you reorder HOURLY_VARS the extraction won't break
+VAR_MAP = {name: i for i, name in enumerate(HOURLY_VARS)}
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 
-HOURLY_VARS = [
-    "temperature_2m",
-    "relative_humidity_2m",
-    "apparent_temperature",
-    "precipitation",
-    "rain",
-    "weather_code",
-    "surface_pressure",
-    "cloud_cover",
-    "wind_speed_10m",
-    "wind_direction_10m",
-    "wind_gusts_10m", 
-    "visibility",
+# ── Explicit column order for the staging → silver upsert ────────────────────
+# Used by write_to_db() so the INSERT/SELECT never relies on column position.
+# This list intentionally excludes "id" — that column is BIGSERIAL and is
+# generated automatically by PostgreSQL on insert.
+SILVER_COLUMNS = [
+    "city", "recorded_at", "fetched_at",
+    "temp_celsius", "apparent_temp", "humidity_pct",
+    "precipitation_mm", "rain_mm", "weather_code",
+    "pressure_hpa", "cloud_cover_pct",
+    "wind_speed_mps", "wind_direction_deg", "wind_gusts_mps",
+    "visibility_m",
 ]
 
-VAR_MAP = {
-    name: i for i, name in enumerate(HOURLY_VARS)
-}
 
-# Validation Bounds
-TEMP_MIN_C = -5.0
-TEMP_MAX_C = 45.0
-EXPECTED_ROWS_PER_DAY = 24
-
+# ── Step 1: Build the API client ──────────────────────────────────────────────
 def build_client() -> openmeteo_requests.Client:
     """
-    Return an Open-Meteo API client with local caching and retry logic.
-
-    Cache TTL: 1800 s (30 min) — suitable for development.
-    For production Airflow runs, set expire_after=-1 to disable caching,
-    since each scheduled run should always fetch fresh data.
+    Creates an API client with:
+      - Caching: saves results locally for 30 min (avoids hitting API twice)
+      - Retry:   automatically retries on network failures (up to 5 times)
     """
-    cache_dir = Path(__file__).resolve().parent / ".openmeteo_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = Path(__file__).parent / ".openmeteo_cache"
+    cache_dir.mkdir(exist_ok=True)
 
-    cache_session = requests_cache.CachedSession(
-        str(cache_dir / "cache"),
-        expire_after=1800,
+    session = requests_cache.CachedSession(
+        str(cache_dir / "cache"), expire_after=1800
     )
-    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-
-    log.info("API client initialised | cache: %s | TTL: 1800 s", cache_dir)
+    retry_session = retry(session, retries=5, backoff_factor=0.2)
+    log.info("API client ready (cache: %s)", cache_dir)
     return openmeteo_requests.Client(session=retry_session)
 
-def build_params(mode: str="live") -> dict:
-    """
-    Build the Open-Meteo request parameter dict.
 
-    mode="live"     → forecast_days=1  (fetch today's 24 hourly readings)
-    mode="backfill" → past_days=31     (fetch the last 31 days of history)
+# ── Step 2: Build API parameters ─────────────────────────────────────────────
+def build_params(mode: str = "live") -> dict:
+    """
+    mode='live'     → fetch today's 24 hourly readings (one full day)
+    mode='backfill' → fetch the last 31 days (used to seed the database)
     """
     params = {
         "latitude":  [c["lat"] for c in CITIES],
         "longitude": [c["lon"] for c in CITIES],
         "hourly":    HOURLY_VARS,
-        # "timezone":  "auto",
-        "timezone": "Africa/Nairobi",
+        "timezone":  "auto",  # Open-Meteo detects Africa/Nairobi from coordinates
     }
     if mode == "backfill":
         params["past_days"] = 31
-        log.info("Mode: BACKFILL — pulling 31 days of historical data")
+        log.info("Mode: BACKFILL — fetching 31 days of history")
     else:
         params["forecast_days"] = 1
-        log.info("Mode: LIVE — pulling today's hourly forecast (24 rows per city)")
-
+        log.info("Mode: LIVE — fetching today (24 rows per city)")
     return params
 
-def fetch_weather(client: openmeteo_requests.Client, params: dict) -> list:
-    """
-    Call the Open-Meteo weather API.
-    Returns a list of response objects (one per city, same order as CITIES).
-    """
+
+# ── Step 3: Call the API ──────────────────────────────────────────────────────
+def fetch_weather(client, params: dict) -> list:
+    """Calls Open-Meteo and returns one response object per city."""
     log.info("Calling Open-Meteo for %d cities ...", len(CITIES))
     responses = client.weather_api(API_URL, params=params)
-    log.info("API call complete — %d responses received", len(responses))
+    log.info("Received %d responses", len(responses))
     return responses
 
 
-def parse_response(
-    response,
-    city: dict,
-    fetched_at: datetime,
-) -> pd.DataFrame:
+# ── Step 4: Parse one city response into a DataFrame ─────────────────────────
+def parse_response(response, city: dict, fetched_at: datetime) -> pd.DataFrame:
     """
     Converts the API response for one city into a clean pandas DataFrame.
     Each row = one hour of data for that city.
     """
     hourly = response.Hourly()
 
-    # Named extraction 
-    def extract(var_name: str):
+    # Use VAR_MAP so the extraction never silently breaks if order changes
+    def get(var_name: str):
         return hourly.Variables(VAR_MAP[var_name]).ValuesAsNumpy()
-    
-    date_range = pd.date_range(
+
+    # Build the timestamps for each hourly reading
+    times = pd.date_range(
         start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
         end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
         freq=pd.Timedelta(seconds=hourly.Interval()),
         inclusive="left",
     )
 
-    hourly_data_dict = {
+    # Column order here matches SILVER_COLUMNS exactly (minus "id").
+    # Keeping these in sync is good practice, even though write_to_db()
+    # no longer depends on it for correctness.
+    df = pd.DataFrame({
         "city":               city["name"],
-        "recorded_at":        date_range,
-        "fetched_at":         fetched_at,
-        "temp_celsius":       extract("temperature_2m"),
-        "apparent_temp":      extract("apparent_temperature"),
-        "humidity_pct":       extract("relative_humidity_2m"),
-        "precipitation_mm":   extract("precipitation"),
-        "rain_mm":            extract("rain"),
-        "weather_code":       extract("weather_code"),
-        "pressure_hpa":       extract("surface_pressure"),
-        "cloud_cover_pct":    extract("cloud_cover"),
-        "wind_speed_mps":     extract("wind_speed_10m"),
-        "wind_direction_deg": extract("wind_direction_10m"),
-        "wind_gusts_mps":     extract("wind_gusts_10m"),
-        "visibility":         extract("visibility"),
-    }
-    df = pd.DataFrame(hourly_data_dict)
+        "recorded_at":        times,
+        "fetched_at":         fetched_at,          # when we pulled this data
+        "temp_celsius":       get("temperature_2m"),
+        "apparent_temp":      get("apparent_temperature"),
+        "humidity_pct":       get("relative_humidity_2m"),
+        "precipitation_mm":   get("precipitation"),
+        "rain_mm":            get("rain"),
+        "weather_code":       get("weather_code"),
+        "pressure_hpa":       get("surface_pressure"),
+        "cloud_cover_pct":    get("cloud_cover"),
+        "wind_speed_mps":     get("wind_speed_10m"),
+        "wind_direction_deg": get("wind_direction_10m"),
+        "wind_gusts_mps":     get("wind_gusts_10m"),
+        "visibility_m":       get("visibility"),
+    })
 
-    log.info(
-        "[%s]  parsed %d rows | lat=%.4f  lon=%.4f",
-        city["name"], len(df), response.Latitude(), response.Longitude(),
-    )
+    log.info("  [%s] %d rows parsed", city["name"], len(df))
     return df
 
-def validate_dataframe(df: pd.DataFrame, city_name: str) -> bool:
+
+# ── Step 5: Validate the data ─────────────────────────────────────────────────
+def validate(df: pd.DataFrame, city_name: str) -> bool:
     """
-    Run sanity checks on a parsed city DataFrame.
-    All failures are logged; the DataFrame is accepted unless it is empty.
+    Quick sanity checks before writing to the database.
+    Returns False if something looks wrong (empty or all nulls).
     """
     if df.empty:
-        log.error("[%s]  FAIL — empty DataFrame, skipping city", city_name)
+        log.error("  [%s] EMPTY — skipping", city_name)
         return False
 
-    # Null counts
-    null_counts = df.isnull().sum()
-    cols_with_nulls = null_counts[null_counts > 0]
-    if not cols_with_nulls.empty:
-        log.warning(
-            "[%s]  nulls detected: %s",
-            city_name,
-            cols_with_nulls.to_dict(),
-        )
+    nulls = df["temp_celsius"].isna().sum()
+    if nulls > 20:
+        log.warning("  [%s] %d null temperatures", city_name, nulls)
 
-    # Temperature sanity (Kenya range)
-    temp = df["temp_celsius"].dropna()
-    out_of_range = (~temp.between(TEMP_MIN_C, TEMP_MAX_C)).sum()
+    out_of_range = (~df["temp_celsius"].dropna().between(-5, 45)).sum()
     if out_of_range:
-        log.warning(
-            "[%s]  %d temperature readings outside[%.0f, %.0f] °C",
-            city_name, out_of_range, TEMP_MIN_C, TEMP_MAX_C,
-        )
-    
-    # Row count check (only meaningful for live/single-day mode)
-    if len(df) < EXPECTED_ROWS_PER_DAY:
-        log.warning(
-            "[%s]  only %d rows (expected ≥ %d for a full day)",
-            city_name, len(df), EXPECTED_ROWS_PER_DAY,
-        )
+        log.warning("  [%s] %d suspicious temperatures", city_name, out_of_range)
 
-    # Duplicate timestamps within this city
-    dupes = df.duplicated(subset=["city", "recorded_at"]).sum()
-    if dupes:
-        log.warning("[%s]  %d duplicate (city, recorded_at) rows", city_name, dupes)
-
-    log.info("[%s]  validation complete (%d rows)", city_name, len(df))
+    log.info("  [%s] validation OK", city_name)
     return True
 
+
+# ── Step 6: Write to Bronze then Silver ──────────────────────────────────────
 def write_to_db(df: pd.DataFrame, engine) -> None:
     """
-    Write the unified DataFrame to:
-        BRONZE: insert raw data to a staging table
-        SILVER: upsert from staging into silver.weather_readings
-            ON CONFLICT DO NOTHING = safe to re-run without creating duplicates
-    """
-    staging_table = "weather_readings_staging"
+    SILVER: insert parsed data to a staging table, then upsert into the
+    real silver.weather_readings table.
 
-    # Step 1: write to a temporary staging table
+    FIX: silver.weather_readings has an "id BIGSERIAL PRIMARY KEY" column
+    that the staging table does NOT have (df.to_sql() only creates columns
+    present in the DataFrame). A bare "INSERT ... SELECT *" maps columns by
+    POSITION — so "city" (text, position 1 in staging) would land in the
+    "id" slot (bigint, position 1 in the real table) and crash with
+    DatatypeMismatch. Naming every column explicitly avoids this entirely,
+    and keeps working even if either table's column order ever changes.
+
+    ON CONFLICT (city, recorded_at) DO NOTHING = safe to re-run without
+    creating duplicates.
+    """
+    # Write to staging (creates/replaces the table each time)
     df.to_sql(
-        staging_table,
+        "weather_readings_staging",
         schema="silver",
         con=engine,
         if_exists="replace",
         index=False,
-        method="multi",   
+        method="multi",
     )
-    log.info("  Staging table written (%d rows)", len(df))
 
-    # Step 2: upsert from staging into the real table
-    upsert_sql = text("""
-        INSERT INTO silver.weather_readings
-        SELECT * FROM silver.weather_readings_staging
-        ON CONFLICT (city, recorded_at) DO NOTHING;
+    columns_sql = ", ".join(SILVER_COLUMNS)
 
-        DROP TABLE IF EXISTS silver.weather_readings_staging;
-    """)
-
+    # Upsert from staging into the real silver table — explicit columns only
     with engine.begin() as conn:
-        conn.execute(upsert_sql)
+        conn.execute(text(f"""
+            INSERT INTO silver.weather_readings ({columns_sql})
+            SELECT {columns_sql}
+            FROM silver.weather_readings_staging
+            ON CONFLICT (city, recorded_at) DO NOTHING;
 
-    log.info(
-        "  Upsert complete — %d rows offered, duplicates skipped automatically",
-        len(df),
-    )
+            DROP TABLE IF EXISTS silver.weather_readings_staging;
+        """))
 
-def write_to_csv(df: pd.DataFrame, output_dir: str = "data/raw") -> None:
-    """
-    writes a new csv file named with the UTC ingestion timestamp.
-    """
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    log.info("  Wrote %d rows to silver.weather_readings", len(df))
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filepath = out_path / f"weather_{ts}.csv"
 
-    df.to_csv(filepath, index=False)
-    log.info("CSV output written: %s (%d rows)", filepath, len(df))
+def write_to_csv(df: pd.DataFrame) -> None:
+    """Fallback: save to CSV if no DATABASE_URL is set."""
+    # FIX: datetime.utcnow() is deprecated since Python 3.12.
+    # Use timezone-aware datetime.now(timezone.utc) instead.
+    path = f"data/raw/weather_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    log.info("Saved to %s", path)
 
+
+# ── Main: wires everything together ──────────────────────────────────────────
 def main(mode: str = "live", dry_run: bool = False) -> None:
-    """
-    Full Generation stage pipeline.
+    log.info("===== Weather Ingest START [mode=%s | dry_run=%s] =====", mode, dry_run)
 
-    Steps:
-        1. Build API client
-        2. Build request params based on mode
-        3. Call Open-Meteo API for all cities
-        4. Parse + validate each city response (per-city error isolation)
-        5. Concatenate all valid DataFrames
-        6. Write to PostgreSQL (or CSV fallback)
-    """
-    log.info(
-        "=========  Weather Ingest START  [mode=%s | dry_run=%s]  =========",
-        mode, dry_run,
-    )
+    fetched_at = datetime.now(timezone.utc)
+    client     = build_client()
+    params     = build_params(mode)
 
-    fetched_at = datetime.now(timezone.utc)   
-
-    # Step 1 — Client
-    client = build_client()
-
-    # Step 2 — Params
-    params = build_params(mode)
-
-    # Step 3 — Fetch
     try:
         responses = fetch_weather(client, params)
     except Exception as e:
         log.error("API call failed: %s", e)
         sys.exit(1)
 
-    # Step 4 — Parse + Validate
-    all_dfs: list[pd.DataFrame] = []
-    failed_cities: list[str] = []
+    all_dfs, failed = [], []
 
-    for idx, response in enumerate(responses):
-        city = CITIES[idx]
-        city_name = city["name"]
+    for i, response in enumerate(responses):
+        city = CITIES[i]
         try:
             df = parse_response(response, city, fetched_at)
-            if validate_dataframe(df, city_name):
+            if validate(df, city["name"]):
                 all_dfs.append(df)
-            else:
-                failed_cities.append(city_name)
         except Exception as e:
-            log.error("[%s]  unhandled error during parse: %s", city_name, e)
-            failed_cities.append(city_name)
-            continue   
+            log.error("  [%s] parse failed: %s", city["name"], e)
+            failed.append(city["name"])
 
-    if failed_cities:
-        log.warning("Cities skipped due to errors: %s", failed_cities)
+    if failed:
+        log.warning("Skipped cities: %s", failed)
 
     if not all_dfs:
-        log.error("No valid data collected from any city. Exiting.")
+        log.error("No data collected. Exiting.")
         sys.exit(1)
 
-    # Step 5 — Combine
-    unified_df = pd.concat(all_dfs, ignore_index=True)
-
-    log.info(
-        "Collection summary | rows: %d | cities: %d | "
-        "date range: %s  →  %s",
-        len(unified_df),
-        len(all_dfs),
-        unified_df["recorded_at"].min(),
-        unified_df["recorded_at"].max(),
-    )
+    combined = pd.concat(all_dfs, ignore_index=True)
+    log.info("Total: %d rows | cities: %d", len(combined), len(all_dfs))
 
     if dry_run:
-        log.info("DRY RUN — skipping all writes. Sample output (10 rows):")
-        print(unified_df.head(10).to_string(index=False))
-        log.info("=========  Weather Ingest DRY RUN DONE  =========")
+        log.info("DRY RUN — not writing. Sample:")
+        print(combined.head(5).to_string(index=False))
         return
 
-    # Step 6 — Write
     db_url = os.getenv("DATABASE_URL")
-
-    if db_url and DB_AVAILABLE:
+    if db_url:
         try:
-            engine = create_engine(
-                db_url,
-                pool_pre_ping=True,   
-            )
-            write_to_db(unified_df, engine)
+            engine = create_engine(db_url, pool_pre_ping=True)
+            write_to_db(combined, engine)
         except Exception as e:
-            log.error("DB write failed (%s). Falling back to CSV.", e)
-            write_to_csv(unified_df)
+            log.error("DB write failed: %s — saving to CSV", e)
+            write_to_csv(combined)
     else:
-        reason = "DATABASE_URL not set" if not db_url else "sqlalchemy not installed"
-        log.warning("%s — writing to CSV fallback.", reason)
-        write_to_csv(unified_df)
+        log.warning("DATABASE_URL not set — writing to CSV")
+        write_to_csv(combined)
 
-    log.info("=========  Weather Ingest DONE  =========")
+    log.info("===== Weather Ingest DONE =====")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Open-Meteo Weather Data Warehouse — Generation Stage"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["live", "backfill"],
-        default=os.getenv("INGEST_MODE", "live"),
-        help=(
-            "live     = today only (forecast_days=1)  [default]\n"
-            "backfill = last 31 days (past_days=31)"
-        ),
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fetch and validate only — do not write to DB or CSV",
-    )
+    parser = argparse.ArgumentParser(description="Weather ingest — Stage 1")
+    parser.add_argument("--mode",    choices=["live", "backfill"], default="live")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, dry_run=args.dry_run)

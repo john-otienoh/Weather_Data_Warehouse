@@ -1,11 +1,14 @@
+
 services:
+
+  # ── PostgreSQL database ─────────────────────────────────────────────────────
   postgres:
     image: postgres:16
     container_name: weather_postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB:       ${POSTGRES_DB:-weather_db}
-      POSTGRES_USER:     ${POSTGRES_USER:-weather_admin}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -13,32 +16,80 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-weather_admin} -d ${POSTGRES_DB:-weather_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
-      timeout: 5s
       retries: 5
     networks:
       - weather_net
-  # pgadmin:
-  #   image: dpage/pgadmin4:latest
-  #   container_name: weather_pgadmin
-  #   restart: unless-stopped
-  #   environment:
-  #     PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_EMAIL:-admin@weather.local}
-  #     PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-  #   ports:
-  #     - "5050:80"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   volumes:
-  #     - pgadmin_data:/var/lib/pgadmin
-  #   networks:
-  #     - weather_net
+
+  # ── Airflow: one-time database setup ────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.8.0
+    container_name: airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
+      "
+    restart: "no"
+    networks:
+      - weather_net
+
+  # ── Airflow scheduler (runs your DAGs on schedule) ──────────────────────────
+  airflow-scheduler:
+    image: apache/airflow:2.8.0
+    container_name: airflow_scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PYTHONPATH: /opt/airflow/project
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - .:/opt/airflow/project
+    command: scheduler
+    networks:
+      - weather_net
+
+  # ── Airflow web UI (view DAGs at http://localhost:8080) ─────────────────────
+  airflow-webserver:
+    image: apache/airflow:2.8.0
+    container_name: airflow_webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-scheduler:
+        condition: service_started
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - weather_net
 
 volumes:
   postgres_data:
-  # pgadmin_data:
 
 networks:
   weather_net:

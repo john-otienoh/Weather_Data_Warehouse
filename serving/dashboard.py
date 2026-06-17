@@ -22,6 +22,12 @@ CITY_COLORS = {
     "Nakuru":"#9C27B0",
     "Eldoret":"#FF9800",
 }
+WMO = {
+    0:"Clear",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",
+    45:"Fog",48:"Rime fog",51:"Light drizzle",53:"Drizzle",55:"Dense drizzle",
+    61:"Slight rain",63:"Rain",65:"Heavy rain",
+    80:"Rain showers",81:"Mod. showers",82:"Heavy showers",95:"Thunderstorm",
+}
 
 def query(sql: str, params: dict = {}) -> pd.DataFrame:
     with engine.connect() as conn:

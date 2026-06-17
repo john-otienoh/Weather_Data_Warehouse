@@ -28,7 +28,7 @@ with DAG(
     max_active_runs=1,
     tags=["weather", "backfill", "manual"],
 ) as dag:
-    def task_check(**context):
+    def task_check_db(**context):
         from db.connection import check_connection
         if not check_connection():
             raise ConnectionError("Database not reachable")
